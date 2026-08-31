@@ -1,0 +1,45 @@
+project:
+  name: rocket-stove-airflow-sim2
+  source_repository: https://github.com/bai-collab/rocket-stove-airflow-sim
+  target_repository: https://github.com/bai-collab/rocket-stove-airflow-sim2
+  version: Physics v3 + VGPU
+
+status:
+  repository_creation: completed
+  old_repository_modified: false
+  phase: phase_1_cpu_reference
+
+implemented:
+  cpu_reference:
+    - finite raw straw fuel
+    - temperature-driven pyrolysis
+    - char generation
+    - volatile gas generation
+    - oxygen/temperature/mixing-dependent volatile combustion
+    - incomplete-combustion smoke formation
+    - heat+oxygen+mixing+residence dependent smoke oxidation
+    - char oxidation
+    - separate mineral matter reservoir
+    - ash exposure from mineral reservoir
+    - organic/mineral conservation diagnostics
+    - carbonization index
+  tests:
+    - cold pyrolysis guard
+    - oxygen-limited char retention
+    - oxygen-rich char oxidation comparison
+    - oxygen-alone does not erase smoke
+    - secondary smoke oxidation condition test
+    - mineral and organic conservation
+  vgpu:
+    - backend interface scaffold
+    - pyrolysis WGSL module scaffold
+    - char oxidation WGSL module scaffold
+
+next:
+  - integrate fuel model into old 2D CPU field solver
+  - add rawStraw and mineralMatter fields per grid cell
+  - replace infinite fire release with finite fuel state
+  - create Physics v3 scenario oracle
+  - migrate Vite + TypeScript
+  - initialize VGPU
+  - migrate airflow compute passes first
