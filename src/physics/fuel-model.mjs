@@ -1,0 +1,210 @@
+const clamp = (x, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, x));
+const smoothstep = (x) => {
+  const t = clamp(x);
+  return t * t * (3 - 2 * t);
+};
+
+export const DEFAULT_FUEL_PARAMS = Object.freeze({
+  ambientTemperature: 25,
+  pyrolysisStartTemperature: 140,
+  pyrolysisFullTemperature: 420,
+  pyrolysisRate: 0.22,
+  charYield: 0.34,
+  volatileYield: 0.66,
+
+  volatileBurnStartTemperature: 180,
+  volatileBurnFullTemperature: 520,
+  volatileBurnRate: 2.2,
+  volatileOxygenUse: 0.34,
+  volatileHeatGain: 185,
+  cleanSmokeYield: 0.02,
+  dirtySmokeYield: 0.58,
+
+  charOxidationStartTemperature: 260,
+  charOxidationFullTemperature: 620,
+  charOxidationRate: 0.5,
+  charOxygenUse: 0.44,
+  charHeatGain: 135,
+
+  secondarySmokeOxidationRate: 0.55,
+  secondarySmokeOxygenUse: 0.14,
+  secondaryHeatGain: 85,
+  ashExposurePerCharOxidized: 0.18,
+});
+
+export function createFuelState({
+  rawStraw = 1,
+  mineralMatter = 0.12,
+  oxygen = 1,
+  temperature = 25,
+} = {}) {
+  return {
+    rawStraw,
+    char: 0,
+    mineralMatter,
+    ash: 0,
+    volatileGas: 0,
+    smoke: 0,
+    exhaustGas: 0,
+    oxygen,
+    temperature,
+
+    pyrolyzedTotal: 0,
+    charGeneratedTotal: 0,
+    charBurnedTotal: 0,
+    volatileGeneratedTotal: 0,
+    volatileBurnedTotal: 0,
+    smokeGeneratedTotal: 0,
+    smokeOxidizedTotal: 0,
+  };
+}
+
+function pyrolysisStep(s, dt, p) {
+  const tempFactor = smoothstep(
+    (s.temperature - p.pyrolysisStartTemperature) /
+      (p.pyrolysisFullTemperature - p.pyrolysisStartTemperature)
+  );
+  if (tempFactor <= 0 || s.rawStraw <= 0) return;
+
+  const converted = Math.min(
+    s.rawStraw,
+    s.rawStraw * p.pyrolysisRate * tempFactor * dt
+  );
+  if (converted <= 0) return;
+
+  const charMade = converted * p.charYield;
+  const volatileMade = converted * p.volatileYield;
+
+  s.rawStraw -= converted;
+  s.char += charMade;
+  s.volatileGas += volatileMade;
+  s.pyrolyzedTotal += converted;
+  s.charGeneratedTotal += charMade;
+  s.volatileGeneratedTotal += volatileMade;
+}
+
+function volatileCombustionStep(s, dt, env, p) {
+  if (s.volatileGas <= 0) return;
+
+  const tempFactor = smoothstep(
+    (s.temperature - p.volatileBurnStartTemperature) /
+      (p.volatileBurnFullTemperature - p.volatileBurnStartTemperature)
+  );
+  const oxygenFactor = clamp((s.oxygen - 0.04) / 0.72);
+  const mixing = clamp(env.mixing ?? 0.5);
+
+  const completeness = clamp(tempFactor * oxygenFactor * (0.25 + 0.75 * mixing));
+  const burnPotential = s.volatileGas * p.volatileBurnRate * completeness * dt;
+  const maxByOxygen = s.oxygen / Math.max(1e-6, p.volatileOxygenUse);
+  const burned = Math.min(s.volatileGas, burnPotential, maxByOxygen);
+
+  if (burned > 0) {
+    s.volatileGas -= burned;
+    s.oxygen = clamp(s.oxygen - burned * p.volatileOxygenUse);
+    s.exhaustGas += burned;
+    s.temperature += burned * p.volatileHeatGain;
+    s.volatileBurnedTotal += burned;
+  }
+
+  const hotEnoughToSmoke = smoothstep((s.temperature - 110) / 180);
+  const poorCombustion = 1 - completeness;
+  const smokeYield =
+    p.cleanSmokeYield + p.dirtySmokeYield * Math.pow(poorCombustion, 1.35);
+  const smokeSource = Math.min(
+    s.volatileGas,
+    s.volatileGas * smokeYield * hotEnoughToSmoke * dt
+  );
+
+  if (smokeSource > 0) {
+    s.volatileGas -= smokeSource;
+    s.smoke += smokeSource;
+    s.smokeGeneratedTotal += smokeSource;
+  }
+}
+
+function secondarySmokeOxidationStep(s, dt, env, p) {
+  if (s.smoke <= 0) return;
+  const tempFactor = smoothstep((s.temperature - 260) / 300);
+  const oxygenFactor = clamp((s.oxygen - 0.08) / 0.65);
+  const mixing = clamp(env.mixing ?? 0.5);
+  const residence = clamp((env.residenceTime ?? 0) / 0.75);
+  const secondary = tempFactor * oxygenFactor * mixing * residence;
+  if (secondary <= 0) return;
+
+  const potential = s.smoke * p.secondarySmokeOxidationRate * secondary * dt;
+  const maxByOxygen = s.oxygen / Math.max(1e-6, p.secondarySmokeOxygenUse);
+  const oxidized = Math.min(s.smoke, potential, maxByOxygen);
+  if (oxidized <= 0) return;
+
+  s.smoke -= oxidized;
+  s.oxygen = clamp(s.oxygen - oxidized * p.secondarySmokeOxygenUse);
+  s.exhaustGas += oxidized;
+  s.temperature += oxidized * p.secondaryHeatGain;
+  s.smokeOxidizedTotal += oxidized;
+}
+
+function charOxidationStep(s, dt, p) {
+  if (s.char <= 0) return;
+
+  const tempFactor = smoothstep(
+    (s.temperature - p.charOxidationStartTemperature) /
+      (p.charOxidationFullTemperature - p.charOxidationStartTemperature)
+  );
+  const oxygenFactor = clamp((s.oxygen - 0.06) / 0.7);
+  const potential = s.char * p.charOxidationRate * tempFactor * oxygenFactor * dt;
+  const maxByOxygen = s.oxygen / Math.max(1e-6, p.charOxygenUse);
+  const oxidized = Math.min(s.char, potential, maxByOxygen);
+  if (oxidized <= 0) return;
+
+  s.char -= oxidized;
+  s.oxygen = clamp(s.oxygen - oxidized * p.charOxygenUse);
+  s.exhaustGas += oxidized;
+  s.temperature += oxidized * p.charHeatGain;
+  s.charBurnedTotal += oxidized;
+
+  // Ash is exposed from the independent mineral reservoir; carbon is NOT converted to minerals.
+  const exposed = Math.min(
+    s.mineralMatter,
+    oxidized * p.ashExposurePerCharOxidized
+  );
+  s.mineralMatter -= exposed;
+  s.ash += exposed;
+}
+
+export function stepFuelModel(state, dt, env = {}, params = DEFAULT_FUEL_PARAMS) {
+  if (!(dt > 0)) return state;
+  pyrolysisStep(state, dt, params);
+  volatileCombustionStep(state, dt, env, params);
+  secondarySmokeOxidationStep(state, dt, env, params);
+  charOxidationStep(state, dt, params);
+  return state;
+}
+
+export function fuelDiagnostics(state, initial = { rawStraw: 1, mineralMatter: 0.12 }) {
+  const organicRemaining = state.rawStraw + state.char + state.volatileGas + state.smoke;
+  const organicConvertedToExhaust = state.exhaustGas;
+  const organicAccounted = organicRemaining + organicConvertedToExhaust;
+  const organicInitial = initial.rawStraw;
+
+  const mineralAccounted = state.mineralMatter + state.ash;
+  const mineralInitial = initial.mineralMatter;
+
+  const charYield = state.pyrolyzedTotal > 1e-9
+    ? state.charGeneratedTotal / state.pyrolyzedTotal
+    : 0;
+  const charRetention = state.charGeneratedTotal > 1e-9
+    ? state.char / state.charGeneratedTotal
+    : 0;
+  const pyrolysisFraction = initial.rawStraw > 1e-9
+    ? 1 - state.rawStraw / initial.rawStraw
+    : 0;
+
+  return {
+    organicError: organicAccounted - organicInitial,
+    mineralError: mineralAccounted - mineralInitial,
+    charYield,
+    charRetention,
+    pyrolysisFraction,
+    carbonizationIndex: 100 * clamp(pyrolysisFraction * charRetention),
+  };
+}
