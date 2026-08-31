@@ -1,0 +1,191 @@
+project:
+  name: rocket-stove-airflow-sim2
+  version: Physics v3 + VGPU
+  theme: Fuel Transformation / Carbonization Model
+  source_repository: https://github.com/bai-collab/rocket-stove-airflow-sim
+
+purpose: >
+  將「火源持續產生燃燒產物」改為「有限稻稈燃料逐步轉化」。
+  先在 CPU reference 建立稻稈熱裂解、揮發氣體燃燒、黑煙、炭化、
+  炭氧化與灰分來源模型，再依序將 airflow 與 fuel transformation 遷移到 VGPU/WebGPU。
+
+references:
+  vgpu_github: https://github.com/vercel-labs/vgpu
+  vgpu_docs: https://vgpu.sh/
+  vgpu_agents: https://vgpu.sh/agents.md
+  vgpu_llms: https://vgpu.sh/llms.txt
+
+physics_contract:
+  tracer:
+    - tracer 只表示氣流視覺化，不代表氧氣分子
+    - tracer 數量不得改變燃燒與 scalar physics
+    - tracer 碰牆不可直接消失
+    - 密閉區不可從外界補 tracer
+
+  airflow:
+    - 空氣不得在密閉區平白生成
+    - 開放區只能從畫布邊界與實際開口交換環境空氣
+    - 高溫造成浮力
+    - 壓力投影修正速度場
+
+  fuel:
+    finite: true
+    reaction: rawStraw -> char + volatileGas
+    pyrolysis_requires:
+      - temperature
+      - rawStraw
+    pyrolysis_does_not_require:
+      - oxygen_rich_condition
+
+  volatile_combustion:
+    requires:
+      - temperature
+      - oxygen
+      - mixing
+    poor_conditions_increase:
+      - smoke
+      - unburned_volatileGas
+
+  secondary_combustion:
+    requires:
+      - high_temperature
+      - oxygen
+      - mixing
+      - residence_time
+    may_reduce:
+      - smoke
+      - volatileGas
+
+  char:
+    generated_by: pyrolysis
+    oxidation_requires:
+      - temperature
+      - oxygen
+    carbonization_means: pyrolysis occurred while much char remained unoxidized
+
+  ash:
+    combustible: false
+    source_model: independent mineralMatter reservoir
+    rule: carbon does not chemically become mineral ash
+
+fuel_states:
+  - rawStraw
+  - char
+  - mineralMatter
+  - ash
+  - volatileGas
+  - smoke
+  - exhaustGas
+  - oxygen
+  - temperature
+
+metrics:
+  - pyrolysisFraction
+  - charYield
+  - charRetention
+  - carbonizationIndex
+  - smokeGeneratedTotal
+  - smokeOxidizedTotal
+  - charGeneratedTotal
+  - charBurnedTotal
+  - organicError
+  - mineralError
+
+migration:
+  phase_1:
+    title: CPU Physics v3 reference
+    status: in_progress
+    tasks:
+      - finite fuel model
+      - pyrolysis
+      - volatile combustion
+      - smoke formation
+      - secondary smoke oxidation
+      - char oxidation
+      - mineral conservation
+      - carbonization metrics
+
+  phase_2:
+    title: Integrate old 2D CPU solver
+    tasks:
+      - copy grid/airflow/scalar architecture from source repo
+      - add rawStraw grid field
+      - add mineralMatter grid field
+      - replace infinite fire release with finite straw state
+      - keep current open/closed region behavior
+      - keep tracer independent of scalar physics
+
+  phase_3:
+    title: Physics v3 scenario oracle
+    scenarios:
+      - sealed_hot
+      - oxygen_rich
+      - hot_oxygen_limited
+      - cold_oxygen_limited
+      - good_secondary_combustion
+      - excessive_cold_air
+
+  phase_4:
+    title: Vite + TypeScript + VGPU infrastructure
+    tasks:
+      - Vite
+      - TypeScript
+      - vgpu
+      - '@vgpu/wgsl'
+      - '@vgpu/wgsl-std'
+      - CPU/GPU SimulationBackend interface
+
+  phase_5:
+    title: Airflow GPU migration
+    first_gpu_target: airflow
+    passes:
+      - buoyancy
+      - velocity_advection
+      - divergence
+      - pressure_jacobi
+      - projection
+      - boundary_exchange
+
+  phase_6:
+    title: Fuel transformation GPU migration
+    passes:
+      - pyrolysis
+      - volatile_combustion
+      - smoke_formation
+      - secondary_combustion
+      - char_oxidation
+      - mineral_ash_accounting
+
+  phase_7:
+    title: Tracer and rendering GPU migration
+
+validation:
+  cpu_is_reference: true
+  gpu_parity: tolerance_based
+  gpu_bit_exact_required: false
+
+  invariants:
+    - rawStraw cannot increase without reset/refuel
+    - cold straw cannot significantly pyrolyze
+    - char cannot appear without pyrolysis
+    - finite fuel cannot create infinite products
+    - smoke cannot disappear from oxygen alone
+    - secondary smoke oxidation requires heat oxygen mixing and residence
+    - char oxidation requires heat and oxygen
+    - mineralMatter + ash is conserved in the local fuel model
+    - closed regions cannot receive environmental oxygen
+    - tracer count cannot alter combustion
+
+student_goals:
+  smoke_reduction:
+    optimize: smoke_out_minimize
+  complete_combustion:
+    optimize:
+      - smoke_out_minimize
+      - volatile_out_minimize
+      - char_remaining_minimize
+  carbonization:
+    optimize:
+      - pyrolysis_high
+      - char_retention_high
+      - excessive_smoke_avoid
