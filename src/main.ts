@@ -22,7 +22,7 @@ app.innerHTML = `
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <p class="eyebrow">Physics v3 · Phase 3C</p>
+        <p class="eyebrow">Physics v3 · Phase 4</p>
         <h1>火箭爐空氣流動與稻稈碳化模擬器</h1>
         <p>設計 → 點火 → 觀察氣流／黑煙／碳化 → 修改 → 再測試</p>
       </div>
@@ -76,7 +76,7 @@ app.innerHTML = `
           <div id="preset-grid" class="preset-grid"></div>
           <p id="preset-description" class="hint"></p>
         </div>
-        <p class="model-note">Physics v3：稻稈是有限燃料。受熱後先熱裂解成揮發性氣體與炭；黑煙只有在高溫、含氧、充分混合並具有停留時間時才可進一步氧化。灰分來自燃料原有礦物質留下，不代表「碳變成灰」。Phase 3C 的 GPU 模式目前加速氣流與標量傳輸；燃料反應、二次燃燒、邊界交換與 tracer 仍由 CPU Physics v3 oracle 管理。</p>
+        <p class="model-note">Physics v3：稻稈是有限燃料。受熱後先熱裂解成揮發性氣體與炭；黑煙只有在高溫、含氧、充分混合並具有停留時間時才可進一步氧化。灰分來自燃料原有礦物質留下，不代表「碳變成灰」。Phase 4 的 GPU 模式已把熱裂解、揮發氣燃燒、炭氧化、氣流與標量傳輸、冷卻、二次燃燒及開放邊界交換搬到 VGPU/WebGPU；CPU 目前同步結果供診斷、Canvas2D 與 tracer 使用。</p>
       </section>
 
       <aside class="panel metrics-panel">
