@@ -2,248 +2,170 @@ project:
   name: rocket-stove-airflow-sim2
   source_repository: https://github.com/bai-collab/rocket-stove-airflow-sim
   target_repository: https://github.com/bai-collab/rocket-stove-airflow-sim2
-  version: Physics v3 + VGPU
+  version: "0.4.0 · Physics v3 + VGPU"
 
 status:
   repository_creation: completed
   old_repository_modified: false
-  phase: phase_3c_browser_backend_switch_complete
-  live_browser_backend: auto_cpu_or_hybrid_gpu_transport
-  gpu_backend_authority: airflow_and_scalar_transport_parity_verified
-  cpu_backend_authority: physics_v3_reaction_oracle
+  phase: phase_4_gpu_physics_v3_complete
+  live_browser_backend: auto_cpu_or_gpu_physics_v3
+  gpu_backend_authority: reaction_and_transport_parity_verified
+  cpu_backend_authority: physics_v3_reference_oracle_and_fallback
   ci: passing
 
 implemented:
   cpu_reference:
     - finite raw straw fuel
     - temperature-driven pyrolysis
-    - char generation
-    - volatile gas generation
+    - char and volatile gas generation
     - oxygen/temperature/mixing-dependent volatile combustion
     - incomplete-combustion smoke formation
-    - heat+oxygen+mixing+residence dependent smoke oxidation
     - char oxidation
-    - separate mineral matter reservoir
-    - ash exposure from mineral reservoir
-    - organic/mineral conservation diagnostics
+    - separate mineral matter and ash reservoirs
+    - cooling and scalar clamping
+    - secondary residence and secondary smoke oxidation
+    - open-boundary air exchange
+    - organic/mineral diagnostics
     - carbonization index
 
-  cpu_2d_airflow:
-    canvas: 900x560
-    solver_cell_px: 12
-    build_cell_px: 24
-    features:
-      - wall/solid mask
-      - interactive wall drawing
-      - finite straw placement
-      - erase tool
-      - temperature field
-      - oxygen field
-      - smoke field
-      - volatile gas field
-      - exhaust gas field
-      - buoyancy
-      - semi-Lagrangian velocity advection
-      - pressure projection
-      - solid-wall no-flow constraint
-      - balanced open-boundary inflow/outflow
-      - open-boundary fresh-air exchange
-      - secondary residence field
-      - secondary smoke oxidation
-      - airflow tracers
-      - wall-safe tracer movement
-      - temperature/smoke visualization
-      - velocity vectors
-
-  stove_presets:
-    - straight vertical riser
-    - Z-baffle
-    - twin-channel
-    - compact sealed oracle
-
-  tests:
-    fuel_and_cpu_airflow:
-      total: 11
-      includes:
-        - cold pyrolysis guard
-        - oxygen-limited char retention
-        - oxygen-rich char oxidation comparison
-        - oxygen-alone does not erase smoke
-        - secondary smoke oxidation condition test
-        - mineral and organic conservation
-        - finite-fuel preset
-        - ignited raw straw decreases
-        - compact sealed stove oxygen decreases
-        - smoke does not auto-decay
-        - open-boundary inflow/outflow balance
-    gpu_parity:
-      runtime: vgpu/node + portable software WebGPU adapter
-      suites:
-        - buoyancy CPU/GPU float parity
-        - local airflow chain parity
-        - global open-boundary flux reduction/correction parity
-        - wall-safe scalar advection CPU/GPU parity
-        - open-boundary scalar exchange CPU/GPU parity
-        - smoke and volatile-gas outflow reduction parity
-
-  frontend:
-    - Vite application
+  browser:
     - interactive 2D stove builder
-    - Physics v3 metrics panel
-    - carbonization indicators
-    - advanced airflow diagnostics
     - Auto / CPU / GPU backend selector
-    - selected backend persisted in localStorage
-    - live backend status pill
-    - WebGPU unavailable fallback messaging
+    - backend preference persisted in localStorage
+    - WebGPU initialization/runtime fallback to CPU
+    - Canvas2D field/tracer rendering from synchronized CPU mirror
+    - Phase 4 status and model explanation
 
-  browser_backend_controller:
-    file: src/simulation/BrowserSimulationController.ts
-    preferences:
-      auto:
-        behavior: prefer GPU transport when browser WebGPU initializes successfully; otherwise CPU fallback
-      cpu:
-        behavior: force Physics v3 CPU reference
-      gpu:
-        behavior: request VGPU/WebGPU transport; fall back to CPU if unavailable or runtime fails
-    ownership:
-      cpu:
-        - geometry and editing state
-        - finite straw / char / mineral / ash state
-        - pyrolysis and primary fuel transformation
-        - cooling and scalar clamping
-        - secondary residence reaction update
-        - secondary combustion
-        - open-boundary scalar exchange in live browser hybrid mode
-        - diagnostics
-        - tracer particles
-        - Canvas2D rendering source arrays
-      gpu:
-        - buoyancy transport pass
-        - velocity advection
-        - divergence
-        - pressure Jacobi
-        - pressure projection
-        - global open-boundary velocity flux correction
-        - wall-safe scalar advection
-    synchronization:
-      - one CPU-to-GPU upload per GPU physics tick
-      - one GPU-to-CPU airflow/scalar handoff per GPU physics tick
-      - no requestAnimationFrame-specific GPU readback
-      - rendering reads synchronized CPU arrays only
-      - backend switch waits for any active physics tick to finish
-      - GPU runtime failure completes the current partially-started tick on CPU before fallback
-    operator_order:
-      gpu_step_transport:
-        - fuel transformation remains on CPU before GPU handoff
-        - GPU buoyancy / airflow / scalar advection
-        - GPU state readback to CPU
-        - CPU cooling
-        - CPU secondary residence update
-        - CPU secondary combustion
-        - CPU open-boundary exchange
-        - CPU tracer update
-      rationale: preserve the established CPU Physics v3 reaction/boundary ordering while fuel chemistry is not yet GPU-owned
-
-  vgpu:
-    integration:
-      - Vite WGSL loader
-      - WGSL TypeScript module declarations
-      - strict TypeScript typecheck
-      - typed GPU field registry
-      - browser VGPU initialization backend
-      - transport-only browser stepTransport entry point
-    storage:
+  gpu_storage:
+    static_or_geometry:
       - solid mask
+      - fuel mask
+    airflow:
       - velocity ping-pong
       - pressure ping-pong
       - divergence
-      - boundary-flux reduction scratch ping-pong
+      - boundary-flux reduction scratch
+    gas_scalars:
       - temperature ping-pong
       - oxygen ping-pong
       - smoke ping-pong
       - volatileGas ping-pong
       - exhaustGas ping-pong
       - secondaryResidence ping-pong
-      - scalar-outflow reduction scratch ping-pong
-    airflow_compute_pipeline:
-      - buoyancy
-      - velocity advection
-      - divergence
-      - pressure Jacobi
-      - pressure projection
-      - per-cell boundary flux statistics
-      - GPU vec2 reduction
-      - global boundary flux correction
-    scalar_compute_pipeline:
-      - wall-safe semi-Lagrangian scalar advection
-      - ambient fallback only when backtrace exits the canvas
-      - solid-wall backtrace isolation
-      - open-boundary fresh-air exchange kernel retained for parity/future full-GPU pipeline
-      - ambient temperature and oxygen mixing kernel retained for parity/future full-GPU pipeline
-      - smoke/volatile/exhaust dilution kernel retained for parity/future full-GPU pipeline
-      - smoke and volatile-gas outflow statistics
-      - GPU vec2 outflow reduction
-    fuel_scaffolds:
-      - pyrolysis WGSL
-      - char oxidation WGSL
+    fuel_state:
+      - rawStraw
+      - char
+      - mineralMatter
+      - ash
+    diagnostics:
+      - scalar-outflow reduction scratch
+      - secondary-reaction reduction scratch
+
+  gpu_physics_pipeline:
+    - ignition heating and pyrolysis
+    - volatile primary combustion
+    - incomplete-combustion smoke generation
+    - char oxidation and mineral-ash exposure
+    - buoyancy
+    - velocity advection
+    - divergence
+    - pressure Jacobi
+    - pressure projection
+    - global open-boundary velocity flux correction
+    - wall-safe scalar advection
+    - cooling and scalar clamping
+    - secondary residence update
+    - secondary smoke oxidation
+    - open-boundary fresh-air scalar exchange
+    - smoke/volatile outflow reduction
+    - secondary-reaction reduction
+
+  phase_4_state_ownership:
+    gpu:
+      - fuel transformation state
+      - airflow state
+      - gas scalar transport
+      - cooling/residence
+      - secondary combustion
+      - open-boundary scalar exchange
+    cpu_mirror:
+      - geometry/editor source state
+      - diagnostics presentation
+      - Canvas2D rendering arrays
+      - tracer particles
+      - fallback reference solver
+    synchronization:
+      - full CPU-to-GPU upload when GPU mode starts
+      - full CPU-to-GPU upload after preset/clear/geometry edits
+      - no normal per-tick CPU-to-GPU field upload
+      - GPU-to-CPU state handoff remains once per physics tick for current Canvas2D/tracer UI
+      - GPU runtime failure restores clock state and recomputes the current tick once on CPU
 
 validation:
   github_actions:
     cpu_physics_invariants: success
     typescript_strict_typecheck: success
-    wgsl_matrix_entries: 11
+    wgsl_matrix_entries: 16
     all_wgsl_validation: success
     portable_software_adapter_install: success
     vgpu_doctor_real_adapter_check: success
     vgpu_airflow_gpu_parity: success
     vgpu_scalar_gpu_parity: success
+    vgpu_fuel_reaction_gpu_parity: success
+    vgpu_cooling_residence_gpu_parity: success
+    vgpu_secondary_combustion_gpu_parity: success
     vite_production_build: success
+  gpu_reaction_parity:
+    - pyrolysis + volatile combustion + char oxidation against CPU formulas
+    - cooling + residence update against CPU operator order
+    - secondary smoke oxidation and reaction statistics against CPU formulas
   browser_runtime:
     compile_and_bundle: verified
-    real_end_user_webgpu_device_matrix: not_automated_yet
+    end_user_webgpu_device_matrix: not_automated_yet
     visual_cpu_gpu_parity: manual_or_future_browser_test
-  policy:
-    - CPU Physics v3 remains the chemistry/reaction oracle during migration
-    - GPU mode in Phase 3C means hybrid GPU transport, not full-GPU Physics v3
-    - sealed regions never receive ambient scalar refill through walls
-    - open-boundary exchange occurs only on actual canvas boundary faces
-    - browser rendering does not trigger extra GPU readback
-    - CPU fallback is mandatory when WebGPU initialization or runtime execution fails
+
+physics_invariants:
+  - tracers visualize airflow; they do not determine oxygen or combustion
+  - oxygen cannot directly delete smoke
+  - sealed regions cannot receive ambient refill through walls
+  - pyrolysis is thermally driven and does not require oxygen
+  - char oxidation requires heat and oxygen
+  - mineral ash remains separate from carbon char
+  - finite fuel cannot generate infinite products
+  - raw straw and retained char are stationary fuel fields, not advected gas scalars
 
 completed:
-  phase_3b_gpu_scalar_fields:
-    - temperature/oxygen/smoke/volatileGas/exhaustGas/residence ping-pong storage
-    - wall-safe scalar advection
-    - open-boundary scalar exchange
-    - sealed-region isolation semantics
-    - GPU smoke/volatile outflow reduction
-    - CPU/GPU scalar parity tests
-    - independent WGSL validation matrix
-    - real software-adapter GPU compute/readback CI
-
+  phase_3b_gpu_scalar_transport:
+    - GPU scalar ping-pong fields
+    - wall-safe advection
+    - open-boundary scalar kernel
+    - GPU outflow reductions
   phase_3c_browser_backend_switch:
-    - define CPU/GPU state ownership boundary
-    - add Auto / CPU / GPU selector
-    - Auto prefers GPU when WebGPU initializes successfully
-    - preserve CPU fallback when WebGPU unavailable
-    - preserve CPU fallback after GPU runtime failure
-    - persist backend preference
-    - asynchronous physics pump avoids blocking requestAnimationFrame
-    - no rendering-specific per-frame GPU readback
-    - preserve CPU Physics v3 operator order in hybrid mode
+    - Auto / CPU / GPU selector
+    - hybrid GPU transport browser path
+    - CPU fallback
+  phase_4_gpu_physics_v3:
+    - persistent device-local fuel state
+    - pyrolysis WGSL compute pass
+    - volatile combustion and smoke-formation WGSL pass
+    - char oxidation WGSL pass
+    - cooling/residence WGSL pass
+    - secondary combustion WGSL pass
+    - live GPU open-boundary exchange
+    - reaction/outflow reductions
+    - browser GPU Physics v3 ownership
+    - reaction numerical parity tests
 
 next:
-  phase_4_gpu_fuel_transformation:
-    - migrate pyrolysis to WGSL
-    - migrate volatile primary combustion to WGSL
-    - migrate char oxidation to WGSL
-    - migrate cooling and secondary combustion to WGSL
-    - move open-boundary scalar exchange into the live GPU pipeline after reactions migrate
-    - reduce CPU-GPU synchronization cost
-    - add full Physics v3 CPU/GPU conservation parity
+  phase_5_gpu_tracers_and_rendering:
+    - migrate tracer particles to GPU storage/compute
+    - render temperature/smoke/velocity fields directly with WebGPU
+    - keep DOM/Canvas overlay only for editor UI if useful
+    - reduce full-field GPU-to-CPU readback to lower-frequency diagnostics
+    - add browser CPU/GPU visual parity tests
+    - add WebGPU device capability diagnostics
 
-  later:
-    - migrate tracer particles
-    - migrate GPU field rendering
-    - automate browser WebGPU device/visual parity tests
+later:
+  - performance profiling and buffer bandwidth measurements
+  - optional adaptive quality settings for school devices
+  - scenario-level carbonization/clean-combustion regression suite
