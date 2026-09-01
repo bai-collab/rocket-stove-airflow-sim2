@@ -7,9 +7,19 @@ import divergenceWgsl from './shaders/airflow/divergence.wgsl';
 import pressureJacobiWgsl from './shaders/airflow/pressure-jacobi.wgsl';
 import projectWgsl from './shaders/airflow/project.wgsl';
 import reduceVec2Wgsl from './shaders/airflow/reduce-vec2.wgsl';
+import coolingResidenceWgsl from './shaders/combustion/cooling-residence.wgsl';
+import secondaryCombustionWgsl from './shaders/combustion/secondary-combustion.wgsl';
+import charOxidationPassWgsl from './shaders/fuel/char-oxidation-pass.wgsl';
+import pyrolysisPassWgsl from './shaders/fuel/pyrolysis-pass.wgsl';
+import volatileCombustionWgsl from './shaders/fuel/volatile-combustion.wgsl';
 import advectScalarWgsl from './shaders/scalar/advect-scalar.wgsl';
 import openBoundaryExchangeWgsl from './shaders/scalar/open-boundary-exchange.wgsl';
-import { GpuFieldRegistry, type CpuAirflowSnapshot, type GpuScalarState } from './GpuFieldRegistry';
+import {
+  GpuFieldRegistry,
+  type CpuAirflowSnapshot,
+  type GpuFuelState,
+  type GpuScalarState,
+} from './GpuFieldRegistry';
 
 export interface SimulationBackend {
   initialize(): Promise<void> | void;
@@ -27,6 +37,10 @@ export type GpuSimulationOptions = {
   traceStep?: number;
 };
 
+export type GpuPhysicsStepOptions = {
+  ignitionActive?: boolean;
+};
+
 type PingPongStorage = {
   readonly read: StorageBuffer;
   readonly write: StorageBuffer;
@@ -34,16 +48,12 @@ type PingPongStorage = {
 };
 
 /**
- * Phase 3B VGPU transport backend.
+ * VGPU Physics v3 backend.
  *
- * CPU Physics v3 remains authoritative. Device-local migration now includes
- * airflow plus scalar advection/open-boundary exchange. Fuel transformation,
- * cooling, secondary reactions and tracer integration still remain on CPU.
- *
- * Phase 3C browser integration uses stepTransport(), which intentionally omits
- * open-boundary scalar exchange so the CPU oracle can preserve its established
- * post-transport reaction/boundary operator order. step() retains the complete
- * Phase 3B transport + boundary pipeline used by parity tests.
+ * step() keeps the Phase 3B transport+boundary pipeline for parity tests.
+ * stepTransport() keeps the Phase 3C transport-only entry point.
+ * stepPhysics() is Phase 4: fuel reactions, transport, cooling/residence,
+ * secondary combustion and open-boundary scalar exchange all execute on GPU.
  */
 export class GpuSimulationBackend implements SimulationBackend {
   private readonly nx: number;
@@ -66,6 +76,11 @@ export class GpuSimulationBackend implements SimulationBackend {
   private boundaryFluxCorrect: Compute | null = null;
   private advectScalar: Compute | null = null;
   private openBoundaryExchange: Compute | null = null;
+  private pyrolysisPass: Compute | null = null;
+  private volatileCombustion: Compute | null = null;
+  private charOxidationPass: Compute | null = null;
+  private coolingResidence: Compute | null = null;
+  private secondaryCombustion: Compute | null = null;
   private initialized = false;
 
   constructor(options: GpuSimulationOptions) {
@@ -111,6 +126,11 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.boundaryFluxCorrect = compute(this.gpu, boundaryFluxCorrectWgsl, { label: 'rocket-stove-airflow:boundary-flux-correct' });
     this.advectScalar = compute(this.gpu, advectScalarWgsl, { label: 'rocket-stove-airflow:advect-scalar' });
     this.openBoundaryExchange = compute(this.gpu, openBoundaryExchangeWgsl, { label: 'rocket-stove-airflow:open-boundary-scalars' });
+    this.pyrolysisPass = compute(this.gpu, pyrolysisPassWgsl, { label: 'rocket-stove-airflow:pyrolysis' });
+    this.volatileCombustion = compute(this.gpu, volatileCombustionWgsl, { label: 'rocket-stove-airflow:volatile-combustion' });
+    this.charOxidationPass = compute(this.gpu, charOxidationPassWgsl, { label: 'rocket-stove-airflow:char-oxidation' });
+    this.coolingResidence = compute(this.gpu, coolingResidenceWgsl, { label: 'rocket-stove-airflow:cooling-residence' });
+    this.secondaryCombustion = compute(this.gpu, secondaryCombustionWgsl, { label: 'rocket-stove-airflow:secondary-combustion' });
     this.initialized = true;
   }
 
@@ -122,14 +142,18 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.runTransport(dt, true);
   }
 
-  /**
-   * Browser Phase 3C transport pass.
-   * Open-boundary scalar exchange remains on CPU after cooling/reactions so the
-   * existing Physics v3 operator order remains unchanged while fuel chemistry
-   * is still CPU-owned.
-   */
   stepTransport(dt: number): void {
     this.runTransport(dt, false);
+  }
+
+  stepPhysics(dt: number, options: GpuPhysicsStepOptions = {}): void {
+    if (!(dt > 0)) return;
+    const workgroups = Math.ceil(this.cellCount / 64);
+    this.runFuelTransformation(dt, Boolean(options.ignitionActive), workgroups);
+    this.runTransport(dt, false);
+    this.runCoolingResidence(dt, workgroups);
+    this.runSecondaryCombustion(dt, workgroups);
+    this.exchangeOpenBoundaryScalars(dt, workgroups);
   }
 
   async readVelocity(): Promise<{ u: Float32Array; v: Float32Array }> {
@@ -138,6 +162,10 @@ export class GpuSimulationBackend implements SimulationBackend {
 
   async readScalarState(): Promise<GpuScalarState> {
     return this.requireFields().readScalarState();
+  }
+
+  async readFuelState(): Promise<GpuFuelState> {
+    return this.requireFields().readFuelState();
   }
 
   async readPressure(): Promise<Float32Array> {
@@ -156,6 +184,10 @@ export class GpuSimulationBackend implements SimulationBackend {
     return this.requireFields().readScalarOutflowTotal();
   }
 
+  async readSecondaryReactionTotal(): Promise<number> {
+    return this.requireFields().readSecondaryReactionTotal();
+  }
+
   reset(): void {
     if (!this.initialized) return;
     const fields = this.requireFields();
@@ -163,6 +195,7 @@ export class GpuSimulationBackend implements SimulationBackend {
     fields.resetPressure();
     fields.resetBoundaryFlux();
     fields.resetScalarOutflow();
+    fields.resetSecondaryReaction();
   }
 
   dispose(): void {
@@ -180,8 +213,151 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.boundaryFluxCorrect = null;
     this.advectScalar = null;
     this.openBoundaryExchange = null;
+    this.pyrolysisPass = null;
+    this.volatileCombustion = null;
+    this.charOxidationPass = null;
+    this.coolingResidence = null;
+    this.secondaryCombustion = null;
     this.gpu = null;
     this.initialized = false;
+  }
+
+  private runFuelTransformation(dt: number, ignitionActive: boolean, workgroups: number): void {
+    const fields = this.requireFields();
+
+    this.requirePass(this.pyrolysisPass, 'pyrolysisPass')
+      .set({
+        params: {
+          dt,
+          ignition_active: ignitionActive ? 1 : 0,
+          pyrolysis_start_temperature: 140,
+          pyrolysis_full_temperature: 420,
+          pyrolysis_rate: 0.22,
+          char_yield: 0.34,
+          volatile_yield: 0.66,
+          ignition_heat_rate: 230,
+          ambient_temperature: 25,
+          max_temperature: 700,
+          cell_count: this.cellCount,
+          _pad0: 0,
+        },
+        fuel_mask: fields.fuelMask,
+        raw_straw: fields.rawStraw,
+        char_mass: fields.char,
+        volatile_gas: fields.volatileGas.read,
+        temperature: fields.temperature.read,
+      })
+      .dispatch(workgroups);
+
+    this.requirePass(this.volatileCombustion, 'volatileCombustion')
+      .set({
+        params: {
+          dt,
+          h: this.h,
+          burn_start_temperature: 180,
+          burn_full_temperature: 520,
+          burn_rate: 2.2,
+          oxygen_use: 0.34,
+          heat_gain: 185,
+          clean_smoke_yield: 0.02,
+          dirty_smoke_yield: 0.58,
+          max_temperature: 700,
+          nx: this.nx,
+          ny: this.ny,
+        },
+        fuel_mask: fields.fuelMask,
+        velocity: fields.velocity.read,
+        volatile_gas: fields.volatileGas.read,
+        oxygen: fields.oxygen.read,
+        temperature: fields.temperature.read,
+        exhaust_gas: fields.exhaustGas.read,
+        smoke: fields.smoke.read,
+      })
+      .dispatch(workgroups);
+
+    this.requirePass(this.charOxidationPass, 'charOxidationPass')
+      .set({
+        params: {
+          dt,
+          oxidation_rate: 0.5,
+          oxygen_use: 0.44,
+          heat_gain: 135,
+          ash_exposure_per_char: 0.18,
+          max_temperature: 700,
+          cell_count: this.cellCount,
+          _pad0: 0,
+        },
+        fuel_mask: fields.fuelMask,
+        char_mass: fields.char,
+        oxygen: fields.oxygen.read,
+        temperature: fields.temperature.read,
+        exhaust_gas: fields.exhaustGas.read,
+        mineral_matter: fields.mineralMatter,
+        ash: fields.ash,
+      })
+      .dispatch(workgroups);
+  }
+
+  private runCoolingResidence(dt: number, workgroups: number): void {
+    const fields = this.requireFields();
+    this.requirePass(this.coolingResidence, 'coolingResidence')
+      .set({
+        params: {
+          dt,
+          ambient_temperature: 25,
+          max_temperature: 700,
+          cooling_rate: 0.018,
+          residence_max: 2,
+          residence_decay_rate: 1.6,
+          reactive_threshold: 0.0005,
+          moving_threshold: 1.5,
+          hot_threshold: 260,
+          _pad0: 0,
+          nx: this.nx,
+          ny: this.ny,
+        },
+        solid: fields.solid,
+        velocity: fields.velocity.read,
+        temperature: fields.temperature.read,
+        oxygen: fields.oxygen.read,
+        smoke: fields.smoke.read,
+        volatile_gas: fields.volatileGas.read,
+        residence: fields.secondaryResidence.read,
+      })
+      .dispatch(workgroups);
+  }
+
+  private runSecondaryCombustion(dt: number, workgroups: number): void {
+    const fields = this.requireFields();
+    fields.resetSecondaryReaction();
+    this.requirePass(this.secondaryCombustion, 'secondaryCombustion')
+      .set({
+        params: {
+          dt,
+          h: this.h,
+          oxidation_rate: 0.55,
+          oxygen_use: 0.14,
+          heat_gain: 85,
+          max_temperature: 700,
+          residence_scale: 0.75,
+          _pad0: 0,
+          nx: this.nx,
+          ny: this.ny,
+          _pad1: 0,
+          _pad2: 0,
+        },
+        solid: fields.solid,
+        velocity: fields.velocity.read,
+        smoke: fields.smoke.read,
+        oxygen: fields.oxygen.read,
+        exhaust_gas: fields.exhaustGas.read,
+        temperature: fields.temperature.read,
+        residence: fields.secondaryResidence.read,
+        reaction_stats: fields.secondaryReaction.write,
+      })
+      .dispatch(workgroups);
+    fields.secondaryReaction.swap();
+    this.reduceVec2Buffer(fields.secondaryReaction, this.cellCount);
   }
 
   private runTransport(dt: number, includeOpenBoundaryExchange: boolean): void {
