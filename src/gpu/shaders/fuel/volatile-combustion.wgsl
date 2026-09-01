@@ -27,15 +27,15 @@ fn smooth_unit(x: f32) -> f32 {
   return t * t * (3.0 - 2.0 * t);
 }
 
-fn velocity_at(x: u32, y: u32) -> vec2f {
-  return velocity[y * params.nx + x];
-}
-
 fn local_mixing(x: u32, y: u32, i: u32) -> f32 {
-  let left = select(i, y * params.nx + (x - 1u), x > 0u);
-  let right = select(i, y * params.nx + (x + 1u), x + 1u < params.nx);
-  let up = select(i, (y - 1u) * params.nx + x, y > 0u);
-  let down = select(i, (y + 1u) * params.nx + x, y + 1u < params.ny);
+  var left = i;
+  var right = i;
+  var up = i;
+  var down = i;
+  if (x > 0u) { left = y * params.nx + (x - 1u); }
+  if (x + 1u < params.nx) { right = y * params.nx + (x + 1u); }
+  if (y > 0u) { up = (y - 1u) * params.nx + x; }
+  if (y + 1u < params.ny) { down = (y + 1u) * params.nx + x; }
   let dvdx = (velocity[right].y - velocity[left].y) / (2.0 * params.h);
   let dudy = (velocity[down].x - velocity[up].x) / (2.0 * params.h);
   let vorticity = abs(dvdx - dudy) * params.h;
