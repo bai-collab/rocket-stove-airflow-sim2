@@ -27,10 +27,18 @@ jobs:
       - name: Typecheck TypeScript and VGPU bindings
         run: npm run typecheck
 
-      - name: Validate WGSL
+      - name: Diagnose scalar advection WGSL
+        continue-on-error: true
+        run: npx vgpu check src/gpu/shaders/scalar/advect-scalar.wgsl
+
+      - name: Diagnose scalar boundary WGSL
+        continue-on-error: true
+        run: npx vgpu check src/gpu/shaders/scalar/open-boundary-exchange.wgsl
+
+      - name: Validate all WGSL
         run: npm run check:wgsl
 
-      - name: Run VGPU airflow parity
+      - name: Run VGPU airflow and scalar parity
         run: npm run test:gpu
 
       - name: Build Vite app
