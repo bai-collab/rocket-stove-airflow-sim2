@@ -10,6 +10,11 @@ export type CpuAirflowSnapshot = {
   volatileGas?: Float32Array;
   exhaustGas?: Float32Array;
   secondaryResidence?: Float32Array;
+  fuelMask?: Uint8Array | Uint32Array;
+  rawStraw?: Float32Array;
+  char?: Float32Array;
+  mineralMatter?: Float32Array;
+  ash?: Float32Array;
 };
 
 export type GpuScalarState = {
@@ -19,6 +24,13 @@ export type GpuScalarState = {
   volatileGas: Float32Array;
   exhaustGas: Float32Array;
   secondaryResidence: Float32Array;
+};
+
+export type GpuFuelState = {
+  rawStraw: Float32Array;
+  char: Float32Array;
+  mineralMatter: Float32Array;
+  ash: Float32Array;
 };
 
 type PingPong = ReturnType<typeof pingPongStorage>;
@@ -37,13 +49,11 @@ function destroyStorage(buffer: StorageBuffer): void {
   resource.buffer?.destroy();
 }
 
-/**
- * Device-local field ownership for the VGPU airflow + scalar migration passes.
- * CPU Physics v3 remains the oracle until browser state ownership switches.
- */
+/** Device-local Physics v3 fields used by VGPU compute passes. */
 export class GpuFieldRegistry {
   readonly cellCount: number;
   readonly solid: StorageBuffer;
+  readonly fuelMask: StorageBuffer;
   readonly velocity: PingPong;
   readonly pressure: PingPong;
   readonly divergence: StorageBuffer;
@@ -57,9 +67,16 @@ export class GpuFieldRegistry {
   readonly secondaryResidence: PingPong;
   readonly scalarOutflow: PingPong;
 
+  readonly rawStraw: StorageBuffer;
+  readonly char: StorageBuffer;
+  readonly mineralMatter: StorageBuffer;
+  readonly ash: StorageBuffer;
+  readonly secondaryReaction: PingPong;
+
   constructor(gpu: Gpu, cellCount: number) {
     this.cellCount = cellCount;
     this.solid = storage(gpu, cellCount * 4, 'read');
+    this.fuelMask = storage(gpu, cellCount * 4, 'read');
     this.velocity = pingPongStorage(gpu, cellCount * 8);
     this.pressure = pingPongStorage(gpu, cellCount * 4);
     this.divergence = storage(gpu, cellCount * 4, 'read-write');
@@ -72,6 +89,12 @@ export class GpuFieldRegistry {
     this.exhaustGas = pingPongStorage(gpu, cellCount * 4);
     this.secondaryResidence = pingPongStorage(gpu, cellCount * 4);
     this.scalarOutflow = pingPongStorage(gpu, cellCount * 8);
+
+    this.rawStraw = storage(gpu, cellCount * 4, 'read-write');
+    this.char = storage(gpu, cellCount * 4, 'read-write');
+    this.mineralMatter = storage(gpu, cellCount * 4, 'read-write');
+    this.ash = storage(gpu, cellCount * 4, 'read-write');
+    this.secondaryReaction = pingPongStorage(gpu, cellCount * 8);
   }
 
   upload(snapshot: CpuAirflowSnapshot): void {
@@ -84,9 +107,16 @@ export class GpuFieldRegistry {
     this.assertOptionalLength(snapshot.volatileGas, 'volatileGas');
     this.assertOptionalLength(snapshot.exhaustGas, 'exhaustGas');
     this.assertOptionalLength(snapshot.secondaryResidence, 'secondaryResidence');
+    this.assertOptionalLength(snapshot.fuelMask, 'fuelMask');
+    this.assertOptionalLength(snapshot.rawStraw, 'rawStraw');
+    this.assertOptionalLength(snapshot.char, 'char');
+    this.assertOptionalLength(snapshot.mineralMatter, 'mineralMatter');
+    this.assertOptionalLength(snapshot.ash, 'ash');
 
     const solid32 = new Uint32Array(this.cellCount);
     solid32.set(snapshot.solid);
+    const fuelMask32 = new Uint32Array(this.cellCount);
+    if (snapshot.fuelMask) fuelMask32.set(snapshot.fuelMask);
     const velocity = new Float32Array(this.cellCount * 2);
     for (let i = 0; i < this.cellCount; i += 1) {
       velocity[i * 2] = snapshot.u[i] ?? 0;
@@ -94,6 +124,7 @@ export class GpuFieldRegistry {
     }
 
     this.solid.write(solid32.buffer);
+    this.fuelMask.write(fuelMask32.buffer);
     this.velocity.read.write(velocity.buffer);
     this.velocity.write.write(velocity.buffer);
 
@@ -103,10 +134,15 @@ export class GpuFieldRegistry {
     this.writeScalarPair(this.volatileGas, snapshot.volatileGas, 0);
     this.writeScalarPair(this.exhaustGas, snapshot.exhaustGas, 0);
     this.writeScalarPair(this.secondaryResidence, snapshot.secondaryResidence, 0);
+    this.writeStorage(this.rawStraw, snapshot.rawStraw, 0);
+    this.writeStorage(this.char, snapshot.char, 0);
+    this.writeStorage(this.mineralMatter, snapshot.mineralMatter, 0);
+    this.writeStorage(this.ash, snapshot.ash, 0);
 
     this.resetPressure();
     this.resetBoundaryFlux();
     this.resetScalarOutflow();
+    this.resetSecondaryReaction();
   }
 
   resetPressure(): void {
@@ -126,6 +162,12 @@ export class GpuFieldRegistry {
     const zero = new Float32Array(this.cellCount * 2);
     this.scalarOutflow.read.write(zero.buffer);
     this.scalarOutflow.write.write(zero.buffer);
+  }
+
+  resetSecondaryReaction(): void {
+    const zero = new Float32Array(this.cellCount * 2);
+    this.secondaryReaction.read.write(zero.buffer);
+    this.secondaryReaction.write.write(zero.buffer);
   }
 
   async readVelocity(): Promise<{ u: Float32Array; v: Float32Array }> {
@@ -158,6 +200,21 @@ export class GpuFieldRegistry {
     };
   }
 
+  async readFuelState(): Promise<GpuFuelState> {
+    const [rawStraw, charMass, mineralMatter, ash] = await Promise.all([
+      this.rawStraw.read(),
+      this.char.read(),
+      this.mineralMatter.read(),
+      this.ash.read(),
+    ]);
+    return {
+      rawStraw: new Float32Array(rawStraw),
+      char: new Float32Array(charMass),
+      mineralMatter: new Float32Array(mineralMatter),
+      ash: new Float32Array(ash),
+    };
+  }
+
   async readPressure(): Promise<Float32Array> {
     return new Float32Array(await this.pressure.read.read());
   }
@@ -176,6 +233,11 @@ export class GpuFieldRegistry {
     return { smokeOut: values[0] ?? 0, volatileOut: values[1] ?? 0 };
   }
 
+  async readSecondaryReactionTotal(): Promise<number> {
+    const values = new Float32Array(await this.secondaryReaction.read.read());
+    return values[0] ?? 0;
+  }
+
   resetVelocity(): void {
     const zero = new Float32Array(this.cellCount * 2);
     this.velocity.read.write(zero.buffer);
@@ -184,6 +246,7 @@ export class GpuFieldRegistry {
 
   dispose(): void {
     destroyStorage(this.solid);
+    destroyStorage(this.fuelMask);
     this.destroyPair(this.velocity);
     this.destroyPair(this.pressure);
     destroyStorage(this.divergence);
@@ -195,6 +258,11 @@ export class GpuFieldRegistry {
     this.destroyPair(this.exhaustGas);
     this.destroyPair(this.secondaryResidence);
     this.destroyPair(this.scalarOutflow);
+    destroyStorage(this.rawStraw);
+    destroyStorage(this.char);
+    destroyStorage(this.mineralMatter);
+    destroyStorage(this.ash);
+    this.destroyPair(this.secondaryReaction);
   }
 
   private writeScalarPair(pair: PingPong, source: Float32Array | undefined, fallback: number): void {
@@ -203,6 +271,13 @@ export class GpuFieldRegistry {
     else data.fill(fallback);
     pair.read.write(data.buffer);
     pair.write.write(data.buffer);
+  }
+
+  private writeStorage(buffer: StorageBuffer, source: Float32Array | undefined, fallback: number): void {
+    const data = new Float32Array(this.cellCount);
+    if (source) data.set(source);
+    else data.fill(fallback);
+    buffer.write(data.buffer);
   }
 
   private destroyPair(pair: PingPong): void {
