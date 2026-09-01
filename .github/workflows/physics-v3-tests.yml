@@ -7,7 +7,41 @@ on:
     branches: [main]
 
 jobs:
+  wgsl-validation:
+    name: WGSL · ${{ matrix.shader }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shader:
+          - src/gpu/shaders/airflow/advect-velocity.wgsl
+          - src/gpu/shaders/airflow/boundary-flux-correct.wgsl
+          - src/gpu/shaders/airflow/boundary-flux-stats.wgsl
+          - src/gpu/shaders/airflow/buoyancy.wgsl
+          - src/gpu/shaders/airflow/divergence.wgsl
+          - src/gpu/shaders/airflow/pressure-jacobi.wgsl
+          - src/gpu/shaders/airflow/project.wgsl
+          - src/gpu/shaders/airflow/reduce-vec2.wgsl
+          - src/gpu/shaders/scalar/advect-scalar.wgsl
+          - src/gpu/shaders/scalar/open-boundary-exchange.wgsl
+          - src/gpu/shaders/fuel/scaffold-check.wgsl
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Validate WGSL
+        run: npx --no-install vgpu check "${{ matrix.shader }}"
+
   test-and-build:
+    needs: wgsl-validation
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -26,9 +60,6 @@ jobs:
 
       - name: Typecheck TypeScript and VGPU bindings
         run: npm run typecheck
-
-      - name: Validate WGSL entry points and modules
-        run: npm run check:wgsl
 
       - name: Run VGPU airflow and scalar parity
         run: npm run test:gpu
