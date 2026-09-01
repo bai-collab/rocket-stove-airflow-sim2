@@ -156,7 +156,8 @@ export class GpuFieldRegistry {
         `tracer position length ${interleavedPositions.length} does not match ${this.tracerCount * 2}`
       );
     }
-    this.tracers.write(interleavedPositions.buffer);
+    const upload = new Float32Array(interleavedPositions);
+    this.tracers.write(upload.buffer);
   }
 
   resetPressure(): void {
