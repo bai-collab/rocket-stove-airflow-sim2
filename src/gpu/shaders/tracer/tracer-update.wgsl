@@ -66,7 +66,10 @@ fn sample_velocity(p: vec2f) -> vec2f {
       weight += w;
     }
   }
-  return select(vec2f(0.0), sum / weight, weight > 1e-6);
+  if (weight > 1e-6) {
+    return sum / weight;
+  }
+  return vec2f(0.0);
 }
 
 fn find_fluid_point_near(p: vec2f) -> vec2f {
@@ -106,17 +109,17 @@ fn inflow_candidate_count() -> u32 {
   return count;
 }
 
-fn inflow_candidate_at(target: u32) -> vec2f {
+fn inflow_candidate_at(candidate_index: u32) -> vec2f {
   var cursor = 0u;
   for (var x = 0u; x < params.nx; x += 2u) {
     let top = x;
     let bottom = (params.ny - 1u) * params.nx + x;
     if (solid[top] == 0u && velocity[top].y > 0.0) {
-      if (cursor == target) { return vec2f((f32(x) + 0.5) * params.h, 2.0); }
+      if (cursor == candidate_index) { return vec2f((f32(x) + 0.5) * params.h, 2.0); }
       cursor += 1u;
     }
     if (solid[bottom] == 0u && velocity[bottom].y < 0.0) {
-      if (cursor == target) { return vec2f((f32(x) + 0.5) * params.h, params.sim_height - 2.0); }
+      if (cursor == candidate_index) { return vec2f((f32(x) + 0.5) * params.h, params.sim_height - 2.0); }
       cursor += 1u;
     }
   }
@@ -124,11 +127,11 @@ fn inflow_candidate_at(target: u32) -> vec2f {
     let left = y * params.nx;
     let right = left + params.nx - 1u;
     if (solid[left] == 0u && velocity[left].x > 0.0) {
-      if (cursor == target) { return vec2f(2.0, (f32(y) + 0.5) * params.h); }
+      if (cursor == candidate_index) { return vec2f(2.0, (f32(y) + 0.5) * params.h); }
       cursor += 1u;
     }
     if (solid[right] == 0u && velocity[right].x < 0.0) {
-      if (cursor == target) { return vec2f(params.sim_width - 2.0, (f32(y) + 0.5) * params.h); }
+      if (cursor == candidate_index) { return vec2f(params.sim_width - 2.0, (f32(y) + 0.5) * params.h); }
       cursor += 1u;
     }
   }
