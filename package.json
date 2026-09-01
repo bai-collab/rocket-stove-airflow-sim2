@@ -8,7 +8,7 @@
     "test:gpu": "node --test tests/*.gpu.mjs",
     "dev": "vite",
     "build": "vite build",
-    "check:wgsl": "vgpu check src/gpu/shaders/airflow/buoyancy.wgsl"
+    "check:wgsl": "node scripts/check-wgsl.mjs"
   },
   "dependencies": {
     "vgpu": "latest",
