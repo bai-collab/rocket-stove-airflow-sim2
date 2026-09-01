@@ -77,12 +77,16 @@ export const STOVE_PRESETS = {
 
   sealed: {
     label: 'D 完全封閉',
-    description: '驗證封閉空間不會從外界補氧；燃料受熱後氧氣逐步耗盡。',
-    walls: buildWalls(({ vertical, horizontal }) => {
-      vertical(15, 14, 22);
-      vertical(21, 14, 22);
-      horizontal(14, 15, 21);
-      horizontal(22, 15, 21);
+    description: '3×3 封閉 oracle：外圈 8 格爐壁包住 1 格稻稈，用來驗證密閉區不從外界補氧。',
+    walls: buildWalls(({ add }) => {
+      const cx = 18;
+      const cy = 20;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          if (dx === 0 && dy === 0) continue;
+          add(cx + dx, cy + dy);
+        }
+      }
     }),
     fuels: [cell(18, 20)],
   },
