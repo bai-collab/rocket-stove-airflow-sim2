@@ -30,6 +30,9 @@ jobs:
           - src/gpu/shaders/fuel/char-oxidation-pass.wgsl
           - src/gpu/shaders/combustion/cooling-residence.wgsl
           - src/gpu/shaders/combustion/secondary-combustion.wgsl
+          - src/gpu/shaders/tracer/tracer-update.wgsl
+          - src/gpu/shaders/render/field-render.wgsl
+          - src/gpu/shaders/render/tracer-render.wgsl
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -74,7 +77,7 @@ jobs:
           VGPU_ADAPTER: software
         run: npx --no-install vgpu doctor --pretty
 
-      - name: Run VGPU Physics v3 parity
+      - name: Run VGPU Physics v3 / tracer / render parity
         env:
           VGPU_ADAPTER: software
         run: npm run test:gpu
