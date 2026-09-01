@@ -27,42 +27,7 @@ jobs:
       - name: Typecheck TypeScript and VGPU bindings
         run: npm run typecheck
 
-      - name: Check airflow advect velocity
-        continue-on-error: true
-        run: npx vgpu check src/gpu/shaders/airflow/advect-velocity.wgsl
-      - name: Check airflow boundary flux correct
-        continue-on-error: true
-        run: npx vgpu check src/gpu/shaders/airflow/boundary-flux-correct.wgsl
-      - name: Check airflow boundary flux stats
-        continue-on-error: true
-        run: npx vgpu check src/gpu/shaders/airflow/boundary-flux-stats.wgsl
-      - name: Check airflow buoyancy
-        continue-on-error: true
-        run: npx vgpu check src/gpu/shaders/airflow/buoyancy.wgsl
-      - name: Check airflow divergence
-        continue-on-error: true
-        run: npx vgpu check src/gpu/shaders/airflow/divergence.wgsl
-      - name: Check airflow pressure Jacobi
-        continue-on-error: true
-        run: npx vgpu check src/gpu/shaders/airflow/pressure-jacobi.wgsl
-      - name: Check airflow project
-        continue-on-error: true
-        run: npx vgpu check src/gpu/shaders/airflow/project.wgsl
-      - name: Check airflow reduce vec2
-        continue-on-error: true
-        run: npx vgpu check src/gpu/shaders/airflow/reduce-vec2.wgsl
-
-      - name: Diagnose scalar advection WGSL
-        continue-on-error: true
-        run: npx vgpu check src/gpu/shaders/scalar/advect-scalar.wgsl
-      - name: Diagnose scalar boundary WGSL
-        continue-on-error: true
-        run: npx vgpu check src/gpu/shaders/scalar/open-boundary-exchange.wgsl
-      - name: Diagnose fuel module harness
-        continue-on-error: true
-        run: npx vgpu check src/gpu/shaders/fuel/scaffold-check.wgsl
-
-      - name: Validate all WGSL
+      - name: Validate WGSL entry points and modules
         run: npm run check:wgsl
 
       - name: Run VGPU airflow and scalar parity
