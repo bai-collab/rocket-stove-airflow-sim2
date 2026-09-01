@@ -7,9 +7,9 @@ project:
 status:
   repository_creation: completed
   old_repository_modified: false
-  phase: phase_3_vgpu_airflow_core
+  phase: phase_3b_gpu_scalar_transport_complete
   live_browser_backend: cpu
-  gpu_backend_authority: parity_candidate
+  gpu_backend_authority: airflow_and_scalar_parity_verified
   ci: passing
 
 implemented:
@@ -76,11 +76,14 @@ implemented:
         - smoke does not auto-decay
         - open-boundary inflow/outflow balance
     gpu_parity:
-      runtime: vgpu/node + Dawn
+      runtime: vgpu/node + portable software WebGPU adapter
       suites:
         - buoyancy CPU/GPU float parity
         - local airflow chain parity
         - global open-boundary flux reduction/correction parity
+        - wall-safe scalar advection CPU/GPU parity
+        - open-boundary scalar exchange CPU/GPU parity
+        - smoke and volatile-gas outflow reduction parity
 
   frontend:
     - Vite application
@@ -97,12 +100,18 @@ implemented:
       - typed GPU field registry
       - browser VGPU initialization backend
     storage:
-      - temperature
       - solid mask
       - velocity ping-pong
       - pressure ping-pong
       - divergence
       - boundary-flux reduction scratch ping-pong
+      - temperature ping-pong
+      - oxygen ping-pong
+      - smoke ping-pong
+      - volatileGas ping-pong
+      - exhaustGas ping-pong
+      - secondaryResidence ping-pong
+      - scalar-outflow reduction scratch ping-pong
     airflow_compute_pipeline:
       - buoyancy
       - velocity advection
@@ -112,6 +121,15 @@ implemented:
       - per-cell boundary flux statistics
       - GPU vec2 reduction
       - global boundary flux correction
+    scalar_compute_pipeline:
+      - wall-safe semi-Lagrangian scalar advection
+      - ambient fallback only when backtrace exits the canvas
+      - solid-wall backtrace isolation
+      - open-boundary fresh-air exchange
+      - ambient temperature and oxygen mixing
+      - smoke/volatile/exhaust dilution on inflow
+      - smoke and volatile-gas outflow statistics
+      - GPU vec2 outflow reduction
     fuel_scaffolds:
       - pyrolysis WGSL
       - char oxidation WGSL
@@ -120,27 +138,38 @@ validation:
   github_actions:
     cpu_physics_invariants: success
     typescript_strict_typecheck: success
+    wgsl_matrix_entries: 11
     all_wgsl_validation: success
-    vgpu_dawn_gpu_parity: success
+    portable_software_adapter_install: success
+    vgpu_doctor_real_adapter_check: success
+    vgpu_airflow_gpu_parity: success
+    vgpu_scalar_gpu_parity: success
     vite_production_build: success
   policy:
     - CPU Physics v3 remains the oracle during migration
     - GPU readback is used in tests/diagnostics, not the hot browser loop
-    - no browser backend switch until airflow/scalar integration has a stable state synchronization strategy
+    - sealed regions never receive ambient scalar refill through walls
+    - open-boundary exchange occurs only on actual canvas boundary faces
+    - browser remains CPU until Phase 3C defines stable CPU/GPU state ownership
+
+completed:
+  phase_3b_gpu_scalar_fields:
+    - temperature/oxygen/smoke/volatileGas/exhaustGas/residence ping-pong storage
+    - wall-safe scalar advection
+    - open-boundary scalar exchange
+    - sealed-region isolation semantics
+    - GPU smoke/volatile outflow reduction
+    - CPU/GPU scalar parity tests
+    - independent WGSL validation matrix
+    - real software-adapter GPU compute/readback CI
 
 next:
-  phase_3b_gpu_scalar_fields:
-    - add temperature/oxygen/smoke/volatileGas/exhaustGas/residence ping-pong storage
-    - migrate scalar advection
-    - migrate open-boundary scalar exchange
-    - add sealed-component scalar conservation strategy on GPU
-    - add CPU/GPU scalar parity tests
-
   phase_3c_browser_backend_switch:
     - design CPU/GPU state ownership boundary
     - add auto/cpu/gpu selector
     - preserve CPU fallback when WebGPU unavailable
     - avoid per-frame GPU readback for rendering/tracers
+    - add browser smoke/oxygen/temperature visual parity checks
 
   later:
     - migrate Physics v3 fuel transformation
