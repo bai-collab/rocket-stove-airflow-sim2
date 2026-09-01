@@ -7,6 +7,20 @@ export type CpuAirflowSnapshot = {
   v: Float32Array;
 };
 
+type DestroyableStorageBuffer = StorageBuffer & {
+  destroy?: () => void;
+  readonly buffer?: { destroy(): void };
+};
+
+function destroyStorage(buffer: StorageBuffer): void {
+  const resource = buffer as DestroyableStorageBuffer;
+  if (typeof resource.destroy === 'function') {
+    resource.destroy();
+    return;
+  }
+  resource.buffer?.destroy();
+}
+
 /**
  * Device-local field ownership for the VGPU airflow migration passes.
  * CPU state remains authoritative until whole-pipeline parity is stable.
@@ -36,34 +50,37 @@ export class GpuFieldRegistry {
     this.assertLength(snapshot.u, 'u');
     this.assertLength(snapshot.v, 'v');
 
-    const solid32 = snapshot.solid instanceof Uint32Array
-      ? snapshot.solid
-      : Uint32Array.from(snapshot.solid);
+    // Copy into owned ArrayBuffers before VGPU.write(). This avoids passing a
+    // SharedArrayBuffer-capable ArrayBufferLike view across the WebGPU API.
+    const temperature = new Float32Array(this.cellCount);
+    temperature.set(snapshot.temperature);
+    const solid32 = new Uint32Array(this.cellCount);
+    solid32.set(snapshot.solid);
     const velocity = new Float32Array(this.cellCount * 2);
     for (let i = 0; i < this.cellCount; i += 1) {
       velocity[i * 2] = snapshot.u[i];
       velocity[i * 2 + 1] = snapshot.v[i];
     }
 
-    this.temperature.write(snapshot.temperature);
-    this.solid.write(solid32);
-    this.velocity.read.write(velocity);
-    this.velocity.write.write(velocity);
+    this.temperature.write(temperature.buffer);
+    this.solid.write(solid32.buffer);
+    this.velocity.read.write(velocity.buffer);
+    this.velocity.write.write(velocity.buffer);
     this.resetPressure();
     this.resetBoundaryFlux();
   }
 
   resetPressure(): void {
     const zero = new Float32Array(this.cellCount);
-    this.pressure.read.write(zero);
-    this.pressure.write.write(zero);
-    this.divergence.write(zero);
+    this.pressure.read.write(zero.buffer);
+    this.pressure.write.write(zero.buffer);
+    this.divergence.write(zero.buffer);
   }
 
   resetBoundaryFlux(): void {
     const zero = new Float32Array(this.cellCount * 2);
-    this.boundaryFlux.read.write(zero);
-    this.boundaryFlux.write.write(zero);
+    this.boundaryFlux.read.write(zero.buffer);
+    this.boundaryFlux.write.write(zero.buffer);
   }
 
   async readVelocity(): Promise<{ u: Float32Array; v: Float32Array }> {
@@ -92,20 +109,20 @@ export class GpuFieldRegistry {
 
   resetVelocity(): void {
     const zero = new Float32Array(this.cellCount * 2);
-    this.velocity.read.write(zero);
-    this.velocity.write.write(zero);
+    this.velocity.read.write(zero.buffer);
+    this.velocity.write.write(zero.buffer);
   }
 
   dispose(): void {
-    this.temperature.destroy();
-    this.solid.destroy();
-    this.velocity.read.destroy();
-    this.velocity.write.destroy();
-    this.pressure.read.destroy();
-    this.pressure.write.destroy();
-    this.divergence.destroy();
-    this.boundaryFlux.read.destroy();
-    this.boundaryFlux.write.destroy();
+    destroyStorage(this.temperature);
+    destroyStorage(this.solid);
+    destroyStorage(this.velocity.read);
+    destroyStorage(this.velocity.write);
+    destroyStorage(this.pressure.read);
+    destroyStorage(this.pressure.write);
+    destroyStorage(this.divergence);
+    destroyStorage(this.boundaryFlux.read);
+    destroyStorage(this.boundaryFlux.write);
   }
 
   private assertLength(value: ArrayLike<number>, name: string): void {
