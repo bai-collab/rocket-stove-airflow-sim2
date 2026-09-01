@@ -61,7 +61,17 @@ jobs:
       - name: Typecheck TypeScript and VGPU bindings
         run: npm run typecheck
 
+      - name: Install VGPU software renderer
+        run: npx --no-install vgpu install-software-renderer
+
+      - name: Verify VGPU software adapter
+        env:
+          VGPU_ADAPTER: software
+        run: npx --no-install vgpu doctor --pretty
+
       - name: Run VGPU airflow and scalar parity
+        env:
+          VGPU_ADAPTER: software
         run: npm run test:gpu
 
       - name: Build Vite app
