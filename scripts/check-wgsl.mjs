@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 const roots = [
   'src/gpu/shaders/airflow',
+  'src/gpu/shaders/scalar',
   'src/gpu/shaders/fuel',
 ];
 
