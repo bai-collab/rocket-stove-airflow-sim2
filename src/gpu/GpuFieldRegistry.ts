@@ -49,9 +49,10 @@ function destroyStorage(buffer: StorageBuffer): void {
   resource.buffer?.destroy();
 }
 
-/** Device-local Physics v3 fields used by VGPU compute passes. */
+/** Device-local Physics v3 fields used by VGPU compute/render passes. */
 export class GpuFieldRegistry {
   readonly cellCount: number;
+  readonly tracerCount: number;
   readonly solid: StorageBuffer;
   readonly fuelMask: StorageBuffer;
   readonly velocity: PingPong;
@@ -72,9 +73,11 @@ export class GpuFieldRegistry {
   readonly mineralMatter: StorageBuffer;
   readonly ash: StorageBuffer;
   readonly secondaryReaction: PingPong;
+  readonly tracers: StorageBuffer;
 
-  constructor(gpu: Gpu, cellCount: number) {
+  constructor(gpu: Gpu, cellCount: number, tracerCount = 320) {
     this.cellCount = cellCount;
+    this.tracerCount = tracerCount;
     this.solid = storage(gpu, cellCount * 4, 'read');
     this.fuelMask = storage(gpu, cellCount * 4, 'read');
     this.velocity = pingPongStorage(gpu, cellCount * 8);
@@ -95,6 +98,8 @@ export class GpuFieldRegistry {
     this.mineralMatter = storage(gpu, cellCount * 4, 'read-write');
     this.ash = storage(gpu, cellCount * 4, 'read-write');
     this.secondaryReaction = pingPongStorage(gpu, cellCount * 8);
+    this.tracers = storage(gpu, tracerCount * 8, 'read-write');
+    this.tracers.write(new Float32Array(tracerCount * 2).buffer);
   }
 
   upload(snapshot: CpuAirflowSnapshot): void {
@@ -143,6 +148,15 @@ export class GpuFieldRegistry {
     this.resetBoundaryFlux();
     this.resetScalarOutflow();
     this.resetSecondaryReaction();
+  }
+
+  uploadTracers(interleavedPositions: Float32Array): void {
+    if (interleavedPositions.length !== this.tracerCount * 2) {
+      throw new RangeError(
+        `tracer position length ${interleavedPositions.length} does not match ${this.tracerCount * 2}`
+      );
+    }
+    this.tracers.write(interleavedPositions.buffer);
   }
 
   resetPressure(): void {
@@ -215,6 +229,10 @@ export class GpuFieldRegistry {
     };
   }
 
+  async readTracers(): Promise<Float32Array> {
+    return new Float32Array(await this.tracers.read());
+  }
+
   async readPressure(): Promise<Float32Array> {
     return new Float32Array(await this.pressure.read.read());
   }
@@ -263,6 +281,7 @@ export class GpuFieldRegistry {
     destroyStorage(this.mineralMatter);
     destroyStorage(this.ash);
     this.destroyPair(this.secondaryReaction);
+    destroyStorage(this.tracers);
   }
 
   private writeScalarPair(pair: PingPong, source: Float32Array | undefined, fallback: number): void {
