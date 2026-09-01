@@ -39,6 +39,11 @@ type PingPongStorage = {
  * CPU Physics v3 remains authoritative. Device-local migration now includes
  * airflow plus scalar advection/open-boundary exchange. Fuel transformation,
  * cooling, secondary reactions and tracer integration still remain on CPU.
+ *
+ * Phase 3C browser integration uses stepTransport(), which intentionally omits
+ * open-boundary scalar exchange so the CPU oracle can preserve its established
+ * post-transport reaction/boundary operator order. step() retains the complete
+ * Phase 3B transport + boundary pipeline used by parity tests.
  */
 export class GpuSimulationBackend implements SimulationBackend {
   private readonly nx: number;
@@ -114,6 +119,72 @@ export class GpuSimulationBackend implements SimulationBackend {
   }
 
   step(dt: number): void {
+    this.runTransport(dt, true);
+  }
+
+  /**
+   * Browser Phase 3C transport pass.
+   * Open-boundary scalar exchange remains on CPU after cooling/reactions so the
+   * existing Physics v3 operator order remains unchanged while fuel chemistry
+   * is still CPU-owned.
+   */
+  stepTransport(dt: number): void {
+    this.runTransport(dt, false);
+  }
+
+  async readVelocity(): Promise<{ u: Float32Array; v: Float32Array }> {
+    return this.requireFields().readVelocity();
+  }
+
+  async readScalarState(): Promise<GpuScalarState> {
+    return this.requireFields().readScalarState();
+  }
+
+  async readPressure(): Promise<Float32Array> {
+    return this.requireFields().readPressure();
+  }
+
+  async readDivergence(): Promise<Float32Array> {
+    return this.requireFields().readDivergence();
+  }
+
+  async readBoundaryFluxTotal(): Promise<{ netOutward: number; faceCount: number }> {
+    return this.requireFields().readBoundaryFluxTotal();
+  }
+
+  async readScalarOutflowTotal(): Promise<{ smokeOut: number; volatileOut: number }> {
+    return this.requireFields().readScalarOutflowTotal();
+  }
+
+  reset(): void {
+    if (!this.initialized) return;
+    const fields = this.requireFields();
+    fields.resetVelocity();
+    fields.resetPressure();
+    fields.resetBoundaryFlux();
+    fields.resetScalarOutflow();
+  }
+
+  dispose(): void {
+    if (!this.initialized) return;
+    this.fields?.dispose();
+    this.gpu?.dispose();
+    this.fields = null;
+    this.buoyancy = null;
+    this.advectVelocity = null;
+    this.divergence = null;
+    this.pressureJacobi = null;
+    this.project = null;
+    this.boundaryFluxStats = null;
+    this.reduceVec2 = null;
+    this.boundaryFluxCorrect = null;
+    this.advectScalar = null;
+    this.openBoundaryExchange = null;
+    this.gpu = null;
+    this.initialized = false;
+  }
+
+  private runTransport(dt: number, includeOpenBoundaryExchange: boolean): void {
     if (!(dt > 0)) return;
     const fields = this.requireFields();
     const workgroups = Math.ceil(this.cellCount / 64);
@@ -181,59 +252,9 @@ export class GpuSimulationBackend implements SimulationBackend {
 
     this.balanceBoundaryFlux(workgroups);
     this.advectScalarFields(dt, workgroups);
-    this.exchangeOpenBoundaryScalars(dt, workgroups);
-  }
-
-  async readVelocity(): Promise<{ u: Float32Array; v: Float32Array }> {
-    return this.requireFields().readVelocity();
-  }
-
-  async readScalarState(): Promise<GpuScalarState> {
-    return this.requireFields().readScalarState();
-  }
-
-  async readPressure(): Promise<Float32Array> {
-    return this.requireFields().readPressure();
-  }
-
-  async readDivergence(): Promise<Float32Array> {
-    return this.requireFields().readDivergence();
-  }
-
-  async readBoundaryFluxTotal(): Promise<{ netOutward: number; faceCount: number }> {
-    return this.requireFields().readBoundaryFluxTotal();
-  }
-
-  async readScalarOutflowTotal(): Promise<{ smokeOut: number; volatileOut: number }> {
-    return this.requireFields().readScalarOutflowTotal();
-  }
-
-  reset(): void {
-    if (!this.initialized) return;
-    const fields = this.requireFields();
-    fields.resetVelocity();
-    fields.resetPressure();
-    fields.resetBoundaryFlux();
-    fields.resetScalarOutflow();
-  }
-
-  dispose(): void {
-    if (!this.initialized) return;
-    this.fields?.dispose();
-    this.gpu?.dispose();
-    this.fields = null;
-    this.buoyancy = null;
-    this.advectVelocity = null;
-    this.divergence = null;
-    this.pressureJacobi = null;
-    this.project = null;
-    this.boundaryFluxStats = null;
-    this.reduceVec2 = null;
-    this.boundaryFluxCorrect = null;
-    this.advectScalar = null;
-    this.openBoundaryExchange = null;
-    this.gpu = null;
-    this.initialized = false;
+    if (includeOpenBoundaryExchange) {
+      this.exchangeOpenBoundaryScalars(dt, workgroups);
+    }
   }
 
   private advectScalarFields(dt: number, workgroups: number): void {
