@@ -22,7 +22,7 @@ app.innerHTML = `
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <p class="eyebrow">Physics v3 · Phase 4</p>
+        <p class="eyebrow">Physics v3 · Phase 5</p>
         <h1>火箭爐空氣流動與稻稈碳化模擬器</h1>
         <p>設計 → 點火 → 觀察氣流／黑煙／碳化 → 修改 → 再測試</p>
       </div>
@@ -70,13 +70,16 @@ app.innerHTML = `
       </aside>
 
       <section class="simulation-card">
-        <canvas id="sim-canvas" width="${SIM_WIDTH}" height="${SIM_HEIGHT}" aria-label="火箭爐二維氣流與燃料轉化模擬"></canvas>
+        <div id="sim-stack" class="sim-stack">
+          <canvas id="gpu-canvas" width="${SIM_WIDTH}" height="${SIM_HEIGHT}" aria-hidden="true"></canvas>
+          <canvas id="sim-canvas" width="${SIM_WIDTH}" height="${SIM_HEIGHT}" aria-label="火箭爐二維氣流與燃料轉化模擬"></canvas>
+        </div>
         <div class="preset-panel">
           <h2>快速爐型</h2>
           <div id="preset-grid" class="preset-grid"></div>
           <p id="preset-description" class="hint"></p>
         </div>
-        <p class="model-note">Physics v3：稻稈是有限燃料。受熱後先熱裂解成揮發性氣體與炭；黑煙只有在高溫、含氧、充分混合並具有停留時間時才可進一步氧化。灰分來自燃料原有礦物質留下，不代表「碳變成灰」。Phase 4 的 GPU 模式已把熱裂解、揮發氣燃燒、炭氧化、氣流與標量傳輸、冷卻、二次燃燒及開放邊界交換搬到 VGPU/WebGPU；CPU 目前同步結果供診斷、Canvas2D 與 tracer 使用。</p>
+        <p class="model-note">Physics v3：稻稈是有限燃料。受熱後先熱裂解成揮發性氣體與炭；黑煙只有在高溫、含氧、充分混合並具有停留時間時才可進一步氧化。灰分來自燃料原有礦物質留下，不代表「碳變成灰」。Phase 5 的 GPU 模式已把燃料反應、氣流、標量傳輸、tracer 更新及溫度／黑煙／速度場呈現留在 VGPU/WebGPU；CPU 完整場只約每 6 個 physics tick 回讀一次，供診斷與故障 checkpoint 使用。</p>
       </section>
 
       <aside class="panel metrics-panel">
@@ -92,6 +95,8 @@ app.innerHTML = `
   </main>
 `;
 
+const simStack = document.querySelector<HTMLDivElement>('#sim-stack')!;
+const gpuCanvas = document.querySelector<HTMLCanvasElement>('#gpu-canvas')!;
 const canvas = document.querySelector<HTMLCanvasElement>('#sim-canvas')!;
 const ctx = canvas.getContext('2d')!;
 const metrics = document.querySelector<HTMLDivElement>('#metrics')!;
@@ -110,6 +115,7 @@ const backendStatus = document.querySelector<HTMLDivElement>('#backend-status')!
 const backendDetail = document.querySelector<HTMLParagraphElement>('#backend-detail')!;
 
 const controller = new BrowserSimulationController();
+controller.attachGpuCanvas(gpuCanvas);
 const sim = controller.cpu;
 let selectedTool = 'wall';
 let selectedPreset = 'straight';
@@ -117,6 +123,7 @@ let drawing = false;
 let lastFrame = performance.now();
 let accumulator = 0;
 let physicsBusy = false;
+let editQueue = Promise.resolve();
 
 function isBackendPreference(value: string | null): value is BackendPreference {
   return value === 'auto' || value === 'cpu' || value === 'gpu';
@@ -127,6 +134,7 @@ function renderBackendStatus(status: BackendStatus) {
   backendStatus.classList.toggle('gpu', status.effective === 'gpu');
   backendStatus.classList.toggle('fallback', status.fallback);
   backendDetail.textContent = status.detail;
+  simStack.classList.toggle('gpu-active', status.effective === 'gpu');
 }
 
 controller.subscribe(renderBackendStatus);
@@ -162,6 +170,7 @@ function renderMetrics() {
 
   advanced.innerHTML = [
     metric('運算後端', controller.status.effective.toUpperCase()),
+    metric('GPU 場回讀', controller.status.effective === 'gpu' ? '約 5 Hz' : '每 tick'),
     metric('二次燃燒速率', d.secondaryRate.toExponential(2)),
     metric('壓力投影殘差', d.pressureResidual.toExponential(2)),
     metric('邊界進流', d.inflow.toFixed(2)),
@@ -174,7 +183,24 @@ function renderMetrics() {
   feedback.textContent = interpret(d);
 }
 
-function drawField() {
+function drawGrid() {
+  ctx.strokeStyle = 'rgba(71, 85, 105, 0.22)';
+  ctx.lineWidth = 1;
+  for (let y = 0; y < SIM_HEIGHT; y += BUILD_CELL) {
+    ctx.beginPath();
+    ctx.moveTo(0, y + 0.5);
+    ctx.lineTo(SIM_WIDTH, y + 0.5);
+    ctx.stroke();
+  }
+  for (let x = 0; x < SIM_WIDTH; x += BUILD_CELL) {
+    ctx.beginPath();
+    ctx.moveTo(x + 0.5, 0);
+    ctx.lineTo(x + 0.5, SIM_HEIGHT);
+    ctx.stroke();
+  }
+}
+
+function drawCpuField() {
   ctx.clearRect(0, 0, SIM_WIDTH, SIM_HEIGHT);
   ctx.fillStyle = '#f8fafc';
   ctx.fillRect(0, 0, SIM_WIDTH, SIM_HEIGHT);
@@ -196,21 +222,6 @@ function drawField() {
         ctx.fillRect(gx * H, gy * H, H + 1, H + 1);
       }
     }
-  }
-
-  ctx.strokeStyle = 'rgba(71, 85, 105, 0.22)';
-  ctx.lineWidth = 1;
-  for (let y = 0; y < SIM_HEIGHT; y += BUILD_CELL) {
-    ctx.beginPath();
-    ctx.moveTo(0, y + 0.5);
-    ctx.lineTo(SIM_WIDTH, y + 0.5);
-    ctx.stroke();
-  }
-  for (let x = 0; x < SIM_WIDTH; x += BUILD_CELL) {
-    ctx.beginPath();
-    ctx.moveTo(x + 0.5, 0);
-    ctx.lineTo(x + 0.5, SIM_HEIGHT);
-    ctx.stroke();
   }
 
   for (let gy = 2; gy < NY; gy += 4) {
@@ -270,6 +281,31 @@ function drawField() {
     ctx.strokeStyle = '#3f2a1d';
     ctx.strokeRect(fuel.x + 3.5, fuel.y + 3.5, BUILD_CELL - 7, BUILD_CELL - 7);
   }
+
+  drawGrid();
+}
+
+function drawGpuOverlay() {
+  ctx.clearRect(0, 0, SIM_WIDTH, SIM_HEIGHT);
+  drawGrid();
+  ctx.lineWidth = 1;
+  for (const wall of sim.walls) {
+    ctx.strokeStyle = 'rgba(63, 42, 29, 0.72)';
+    ctx.strokeRect(wall.x + 1.5, wall.y + 1.5, BUILD_CELL - 3, BUILD_CELL - 3);
+  }
+  for (const fuel of sim.fuels) {
+    ctx.strokeStyle = 'rgba(63, 42, 29, 0.68)';
+    ctx.strokeRect(fuel.x + 3.5, fuel.y + 3.5, BUILD_CELL - 7, BUILD_CELL - 7);
+  }
+}
+
+function drawPresentation() {
+  if (controller.status.effective === 'gpu') {
+    controller.renderGpuFrame();
+    drawGpuOverlay();
+  } else {
+    drawCpuField();
+  }
 }
 
 function canvasPoint(event: PointerEvent) {
@@ -280,20 +316,26 @@ function canvasPoint(event: PointerEvent) {
   };
 }
 
-function applyTool(event: PointerEvent) {
+function queueTool(event: PointerEvent) {
   const p = canvasPoint(event);
-  controller.setToolAt(selectedTool, p.x, p.y);
-  drawField();
-  renderMetrics();
+  editQueue = editQueue
+    .then(async () => {
+      await controller.setToolAt(selectedTool, p.x, p.y);
+      drawPresentation();
+      renderMetrics();
+    })
+    .catch((error) => {
+      console.error('Editor update failed', error);
+    });
 }
 
 canvas.addEventListener('pointerdown', (event) => {
   drawing = true;
   canvas.setPointerCapture(event.pointerId);
-  applyTool(event);
+  queueTool(event);
 });
 canvas.addEventListener('pointermove', (event) => {
-  if (drawing) applyTool(event);
+  if (drawing) queueTool(event);
 });
 canvas.addEventListener('pointerup', () => { drawing = false; });
 canvas.addEventListener('pointercancel', () => { drawing = false; });
@@ -321,7 +363,7 @@ function loadPreset(id: string) {
   });
   pauseButton.textContent = '暫停';
   accumulator = 0;
-  drawField();
+  drawPresentation();
   renderMetrics();
 }
 
@@ -339,7 +381,7 @@ resetButton.addEventListener('click', () => loadPreset(selectedPreset));
 clearButton.addEventListener('click', () => {
   controller.clearScene();
   accumulator = 0;
-  drawField();
+  drawPresentation();
   renderMetrics();
 });
 speedInput.addEventListener('input', () => {
@@ -354,6 +396,7 @@ backendSelect.addEventListener('change', async () => {
     localStorage.setItem('rocket-stove-backend', preference);
     await controller.setBackend(preference);
     accumulator = 0;
+    drawPresentation();
   } finally {
     backendSelect.disabled = false;
   }
@@ -374,14 +417,14 @@ async function advancePhysics() {
   }
 }
 
-function frame(now: number) {
+function frameLoop(now: number) {
   const elapsed = Math.min(0.08, (now - lastFrame) / 1000);
   lastFrame = now;
   accumulator = Math.min(DT * 6, accumulator + elapsed * Number(speedInput.value));
   void advancePhysics();
-  drawField();
+  drawPresentation();
   renderMetrics();
-  requestAnimationFrame(frame);
+  requestAnimationFrame(frameLoop);
 }
 
 const storedBackend = localStorage.getItem('rocket-stove-backend');
@@ -389,6 +432,6 @@ const initialBackend: BackendPreference = isBackendPreference(storedBackend) ? s
 backendSelect.value = initialBackend;
 loadPreset(selectedPreset);
 await controller.initialize(initialBackend);
-requestAnimationFrame(frame);
+requestAnimationFrame(frameLoop);
 
 window.addEventListener('beforeunload', () => controller.dispose());
