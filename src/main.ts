@@ -1,254 +1,330 @@
 import './style.css';
 import {
-  createFuelState,
-  fuelDiagnostics,
-  stepFuelModel,
-} from './physics/fuel-model.mjs';
-
-type Preset = {
-  label: string;
-  temperature: number;
-  oxygen: number;
-  mixing: number;
-  residenceTime: number;
-};
-
-const presets: Record<string, Preset> = {
-  carbonization: {
-    label: '高溫缺氧／碳化',
-    temperature: 500,
-    oxygen: 0.08,
-    mixing: 0.35,
-    residenceTime: 0.2,
-  },
-  clean: {
-    label: '高溫富氧／較充分燃燒',
-    temperature: 560,
-    oxygen: 1,
-    mixing: 0.9,
-    residenceTime: 1,
-  },
-  smoky: {
-    label: '低溫缺氧／不完全燃燒',
-    temperature: 260,
-    oxygen: 0.12,
-    mixing: 0.2,
-    residenceTime: 0.1,
-  },
-  secondary: {
-    label: '高溫＋混合＋停留／二次燃燒',
-    temperature: 650,
-    oxygen: 1,
-    mixing: 1,
-    residenceTime: 1,
-  },
-};
+  AMBIENT_T,
+  CpuRocketSimulation,
+  DT,
+  H,
+  NX,
+  NY,
+  SIM_HEIGHT,
+  SIM_WIDTH,
+} from './simulation/CpuRocketSimulation.mjs';
+import { BUILD_CELL, STOVE_PRESETS } from './simulation/presets.mjs';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
 
 app.innerHTML = `
-  <section class="shell">
-    <header>
+  <main class="app-shell">
+    <header class="topbar">
       <div>
-        <p class="eyebrow">Physics v3 CPU reference</p>
-        <h1>稻稈燃料轉化實驗室</h1>
-        <p class="lede">先驗證「稻稈 → 熱裂解 → 揮發氣體 + 炭 → 燃燒／碳化」因果鏈，再接回完整火箭爐氣流場。</p>
+        <p class="eyebrow">Physics v3 · Phase 2</p>
+        <h1>火箭爐空氣流動與稻稈碳化模擬器</h1>
+        <p>設計 → 點火 → 觀察氣流／黑煙／碳化 → 修改 → 再測試</p>
       </div>
-      <div class="status-pill">CPU reference</div>
+      <div class="status-pill">CPU airflow reference · VGPU migration pending</div>
     </header>
 
-    <section class="preset-row" id="presets"></section>
+    <section class="workspace">
+      <aside class="panel tools">
+        <h2>1. 建造火箭爐</h2>
+        <div class="tool-grid" id="tool-grid">
+          <button class="tool active" data-tool="wall">磚塊／爐壁</button>
+          <button class="tool" data-tool="fuel">稻稈燃料</button>
+          <button class="tool" data-tool="erase">橡皮擦</button>
+        </div>
+        <p class="hint">爐壁留下的開口就是自然進排氣通道。藍色粒子只是氣流示蹤，不是氧氣分子。</p>
 
-    <section class="grid-layout">
-      <article class="panel controls">
-        <h2>環境條件</h2>
-        <label>溫度 <output id="temperature-out"></output>
-          <input id="temperature" type="range" min="25" max="700" step="5" />
-        </label>
-        <label>初始氧氣 <output id="oxygen-out"></output>
-          <input id="oxygen" type="range" min="0" max="1" step="0.01" />
-        </label>
-        <label>混合程度 <output id="mixing-out"></output>
-          <input id="mixing" type="range" min="0" max="1" step="0.01" />
-        </label>
-        <label>停留時間 <output id="residence-out"></output>
-          <input id="residence" type="range" min="0" max="1.5" step="0.05" />
-        </label>
-
-        <div class="button-row">
-          <button id="toggle" class="primary">開始</button>
-          <button id="reset">重設</button>
+        <h2>2. 測試</h2>
+        <div class="action-stack">
+          <button id="ignite" class="primary">🔥 點火</button>
+          <button id="pause">暫停</button>
+          <button id="reset">重新載入爐型</button>
+          <button id="clear">全部清除</button>
         </div>
 
-        <p class="note">此頁只測試燃料轉化核心；完整二維 airflow、開放／封閉區與 tracer 會在 Phase 2 接回。</p>
-      </article>
+        <label class="range-label" for="speed">模擬速度 <output id="speed-value">1×</output></label>
+        <input id="speed" type="range" min="1" max="4" step="1" value="1" />
 
-      <article class="panel">
-        <div class="panel-title-row">
-          <h2>燃料狀態</h2>
-          <span id="time">0.0 s</span>
+        <div class="legend">
+          <span><i class="dot air"></i>藍：空氣 tracer</span>
+          <span><i class="dot heat"></i>橘：高溫區</span>
+          <span><i class="dot smoke"></i>黑灰：相對黑煙</span>
+          <span><i class="box fuel"></i>黃褐→黑：稻稈→炭</span>
+          <span><i class="box wall"></i>磚牆</span>
         </div>
-        <div id="bars" class="bars"></div>
-      </article>
+      </aside>
 
-      <article class="panel metrics-panel">
-        <h2>教學指標</h2>
+      <section class="simulation-card">
+        <canvas id="sim-canvas" width="${SIM_WIDTH}" height="${SIM_HEIGHT}" aria-label="火箭爐二維氣流與燃料轉化模擬"></canvas>
+        <div class="preset-panel">
+          <h2>快速爐型</h2>
+          <div id="preset-grid" class="preset-grid"></div>
+          <p id="preset-description" class="hint"></p>
+        </div>
+        <p class="model-note">Physics v3：稻稈是有限燃料。受熱後先熱裂解成揮發性氣體與炭；黑煙只有在高溫、含氧、充分混合並具有停留時間時才可進一步氧化。灰分來自燃料原有礦物質留下，不代表「碳變成灰」。</p>
+      </section>
+
+      <aside class="panel metrics-panel">
+        <h2>3. 觀察結果</h2>
         <div id="metrics" class="metrics"></div>
-      </article>
-
-      <article class="panel explanation-panel">
-        <h2>目前判讀</h2>
-        <p id="interpretation"></p>
-        <div class="reaction-chain">
-          稻稈 → 熱裂解 → <strong>炭</strong> + <strong>揮發性氣體</strong> → 完全／不完全燃燒
-        </div>
-      </article>
+        <details open>
+          <summary>進階診斷</summary>
+          <div id="advanced" class="metrics advanced"></div>
+        </details>
+        <div id="feedback" class="feedback"></div>
+      </aside>
     </section>
-  </section>
+  </main>
 `;
 
-const input = (id: string) => document.querySelector<HTMLInputElement>(`#${id}`)!;
-const output = (id: string) => document.querySelector<HTMLOutputElement>(`#${id}`)!;
-
-const temperatureInput = input('temperature');
-const oxygenInput = input('oxygen');
-const mixingInput = input('mixing');
-const residenceInput = input('residence');
-const toggleButton = document.querySelector<HTMLButtonElement>('#toggle')!;
-const resetButton = document.querySelector<HTMLButtonElement>('#reset')!;
-const bars = document.querySelector<HTMLDivElement>('#bars')!;
+const canvas = document.querySelector<HTMLCanvasElement>('#sim-canvas')!;
+const ctx = canvas.getContext('2d')!;
 const metrics = document.querySelector<HTMLDivElement>('#metrics')!;
-const interpretation = document.querySelector<HTMLParagraphElement>('#interpretation')!;
-const timeOutput = document.querySelector<HTMLSpanElement>('#time')!;
+const advanced = document.querySelector<HTMLDivElement>('#advanced')!;
+const feedback = document.querySelector<HTMLDivElement>('#feedback')!;
+const presetGrid = document.querySelector<HTMLDivElement>('#preset-grid')!;
+const presetDescription = document.querySelector<HTMLParagraphElement>('#preset-description')!;
+const igniteButton = document.querySelector<HTMLButtonElement>('#ignite')!;
+const pauseButton = document.querySelector<HTMLButtonElement>('#pause')!;
+const resetButton = document.querySelector<HTMLButtonElement>('#reset')!;
+const clearButton = document.querySelector<HTMLButtonElement>('#clear')!;
+const speedInput = document.querySelector<HTMLInputElement>('#speed')!;
+const speedValue = document.querySelector<HTMLOutputElement>('#speed-value')!;
 
-let selectedPreset = 'carbonization';
-let running = false;
-let simulationTime = 0;
-let state = createFuelState();
-
-function numeric(el: HTMLInputElement) {
-  return Number(el.value);
-}
-
-function setPreset(key: string) {
-  const preset = presets[key];
-  selectedPreset = key;
-  temperatureInput.value = String(preset.temperature);
-  oxygenInput.value = String(preset.oxygen);
-  mixingInput.value = String(preset.mixing);
-  residenceInput.value = String(preset.residenceTime);
-  document.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((button) => {
-    button.classList.toggle('active', button.dataset.preset === key);
-  });
-  resetSimulation();
-}
-
-function resetSimulation() {
-  running = false;
-  simulationTime = 0;
-  state = createFuelState({
-    temperature: numeric(temperatureInput),
-    oxygen: numeric(oxygenInput),
-    rawStraw: 1,
-    mineralMatter: 0.12,
-  });
-  toggleButton.textContent = '開始';
-  render();
-}
-
-function bar(label: string, value: number, max = 1) {
-  const ratio = Math.max(0, Math.min(1, value / Math.max(max, 1e-6)));
-  return `
-    <div class="bar-row">
-      <div class="bar-label"><span>${label}</span><strong>${value.toFixed(3)}</strong></div>
-      <div class="bar-track"><div class="bar-fill" style="width:${ratio * 100}%"></div></div>
-    </div>
-  `;
-}
+const sim = new CpuRocketSimulation();
+let selectedTool = 'wall';
+let selectedPreset = 'straight';
+let drawing = false;
+let lastFrame = performance.now();
+let accumulator = 0;
 
 function metric(label: string, value: string) {
   return `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`;
 }
 
-function classify(d: ReturnType<typeof fuelDiagnostics>) {
-  if (d.pyrolysisFraction < 0.15) return '目前主要是加熱不足：多數稻稈尚未完成熱裂解。';
-  if (d.charRetention > 0.65 && state.char > 0.08) return '目前偏向碳化／保炭：稻稈已明顯熱裂解，但生成的炭仍大量保留。';
-  if (state.smoke > 0.08 || state.volatileGas > 0.08) return '目前偏向不完全燃燒：仍有較多黑煙或未燃揮發氣體。';
-  if (d.charRetention < 0.3 && state.smoke < 0.03) return '目前偏向較充分燃燒：炭保留低、黑煙也相對低。';
-  return '目前介於碳化與燃燒之間，可改變氧氣、溫度、混合或停留時間繼續比較。';
+function interpret(d: ReturnType<typeof sim.diagnostics>) {
+  if (!sim.ignited) return '先按「點火」，再觀察高溫煙氣是否能建立自然上升流。';
+  if (d.pyrolysisFraction < 0.08 && d.time > 3) return '稻稈熱裂解仍低：可檢查燃料是否被爐體阻隔、或高溫區是否建立。';
+  if (d.fuelOxygen < 0.16 && d.charRetention > 0.65) return '目前偏碳化／保炭：燃料附近缺氧，生成的炭較多被保留下來。';
+  if (d.smoke > 0.08 && d.secondaryRate < 0.001) return '目前偏不完全燃燒：黑煙較多，但二次燃燒條件不足。';
+  if (d.smokeOut > 0.02 && d.secondaryRate > 0) return '已有二次燃燒，但仍有黑煙排出；可調整煙道、混合區或開口位置。';
+  if (d.charRetention < 0.35 && d.smoke < 0.03) return '目前較偏充分燃燒：黑煙低、生成炭也持續氧化。';
+  return '目前介於燃燒與碳化之間；比較不同爐型的氧氣、黑煙排出與炭保留率。';
 }
 
-function render() {
-  output('temperature-out').value = `${numeric(temperatureInput).toFixed(0)} °C`;
-  output('oxygen-out').value = numeric(oxygenInput).toFixed(2);
-  output('mixing-out').value = numeric(mixingInput).toFixed(2);
-  output('residence-out').value = `${numeric(residenceInput).toFixed(2)} s`;
-  timeOutput.textContent = `${simulationTime.toFixed(1)} s`;
-
-  const d = fuelDiagnostics(state, { rawStraw: 1, mineralMatter: 0.12 });
-
-  bars.innerHTML = [
-    bar('剩餘稻稈', state.rawStraw),
-    bar('炭', state.char),
-    bar('揮發性氣體', state.volatileGas),
-    bar('相對黑煙', state.smoke),
-    bar('灰分', state.ash, 0.12),
-    bar('剩餘氧氣', state.oxygen),
-  ].join('');
-
+function renderMetrics() {
+  const d = sim.diagnostics();
   metrics.innerHTML = [
+    metric('平均氣流速度', `${d.averageSpeed.toFixed(1)} px/s`),
+    metric('燃料區相對氧氣', `${(d.fuelOxygen * 100).toFixed(0)}%`),
+    metric('相對黑煙量', d.smoke.toFixed(3)),
+    metric('黑煙排出累積', d.smokeOut.toFixed(3)),
     metric('熱裂解比例', `${(d.pyrolysisFraction * 100).toFixed(1)}%`),
     metric('炭保留率', `${(d.charRetention * 100).toFixed(1)}%`),
     metric('碳化指標', d.carbonizationIndex.toFixed(1)),
-    metric('累積形成炭', state.charGeneratedTotal.toFixed(3)),
-    metric('已氧化炭', state.charBurnedTotal.toFixed(3)),
-    metric('累積產煙', state.smokeGeneratedTotal.toFixed(3)),
-    metric('二次氧化煙', state.smokeOxidizedTotal.toFixed(3)),
-    metric('有機物守恆誤差', d.organicError.toExponential(2)),
-    metric('礦物質守恆誤差', d.mineralError.toExponential(2)),
+    metric('剩餘稻稈', d.rawStraw.toFixed(3)),
+    metric('剩餘炭', d.char.toFixed(3)),
+    metric('灰分顯現', d.ash.toFixed(3)),
   ].join('');
 
-  interpretation.textContent = classify(d);
+  advanced.innerHTML = [
+    metric('二次燃燒速率', d.secondaryRate.toExponential(2)),
+    metric('壓力投影殘差', d.pressureResidual.toExponential(2)),
+    metric('邊界進流', d.inflow.toFixed(2)),
+    metric('邊界出流', d.outflow.toFixed(2)),
+    metric('未燃揮發氣體', d.volatileGas.toFixed(3)),
+    metric('平均溫度', `${d.averageTemperature.toFixed(1)} °C`),
+    metric('有機守恆誤差', d.organicError.toExponential(2)),
+    metric('礦物守恆誤差', d.mineralError.toExponential(2)),
+  ].join('');
+  feedback.textContent = interpret(d);
 }
 
-function tick() {
-  if (running) {
-    const dt = 0.02;
-    const stepsPerFrame = 4;
-    for (let i = 0; i < stepsPerFrame; i += 1) {
-      // The mini-lab treats the temperature slider as an external heater set-point.
-      // Full airflow/thermal coupling will replace this controlled condition in Phase 2.
-      state.temperature = numeric(temperatureInput);
-      stepFuelModel(state, dt, {
-        mixing: numeric(mixingInput),
-        residenceTime: numeric(residenceInput),
-      });
-      simulationTime += dt;
+function drawField() {
+  ctx.clearRect(0, 0, SIM_WIDTH, SIM_HEIGHT);
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(0, 0, SIM_WIDTH, SIM_HEIGHT);
+
+  for (let gy = 0; gy < NY; gy += 1) {
+    for (let gx = 0; gx < NX; gx += 1) {
+      const i = gy * NX + gx;
+      if (sim.solid[i]) continue;
+      const temp = sim.temperature[i];
+      if (temp > AMBIENT_T + 8) {
+        const t = Math.min(1, (temp - AMBIENT_T) / 450);
+        ctx.fillStyle = `rgba(245, 112, 38, ${0.04 + t * 0.30})`;
+        ctx.fillRect(gx * H, gy * H, H + 1, H + 1);
+      }
+      const smoke = sim.smoke[i];
+      if (smoke > 0.0003) {
+        const alpha = Math.min(0.62, smoke * 3.4);
+        ctx.fillStyle = `rgba(25, 28, 33, ${alpha})`;
+        ctx.fillRect(gx * H, gy * H, H + 1, H + 1);
+      }
     }
-    render();
   }
-  requestAnimationFrame(tick);
+
+  ctx.strokeStyle = 'rgba(71, 85, 105, 0.22)';
+  ctx.lineWidth = 1;
+  for (let y = 0; y < SIM_HEIGHT; y += BUILD_CELL) {
+    ctx.beginPath();
+    ctx.moveTo(0, y + 0.5);
+    ctx.lineTo(SIM_WIDTH, y + 0.5);
+    ctx.stroke();
+  }
+  for (let x = 0; x < SIM_WIDTH; x += BUILD_CELL) {
+    ctx.beginPath();
+    ctx.moveTo(x + 0.5, 0);
+    ctx.lineTo(x + 0.5, SIM_HEIGHT);
+    ctx.stroke();
+  }
+
+  for (let gy = 2; gy < NY; gy += 4) {
+    for (let gx = 2; gx < NX; gx += 4) {
+      const i = gy * NX + gx;
+      if (sim.solid[i]) continue;
+      const u = sim.u[i];
+      const v = sim.v[i];
+      const speed = Math.hypot(u, v);
+      if (speed < 2) continue;
+      const scale = Math.min(12, 2 + speed * 0.18) / speed;
+      const x = (gx + 0.5) * H;
+      const y = (gy + 0.5) * H;
+      ctx.strokeStyle = 'rgba(51, 65, 85, 0.30)';
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + u * scale, y + v * scale);
+      ctx.stroke();
+    }
+  }
+
+  for (const p of sim.tracers) {
+    const temp = sim.sampleField(sim.temperature, p.x, p.y, AMBIENT_T);
+    ctx.fillStyle = temp > 100 ? 'rgba(249, 115, 22, 0.78)' : 'rgba(37, 99, 235, 0.70)';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 1.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  for (const wall of sim.walls) {
+    ctx.fillStyle = '#8b5e3c';
+    ctx.fillRect(wall.x + 1, wall.y + 1, BUILD_CELL - 2, BUILD_CELL - 2);
+    ctx.strokeStyle = '#5f3f29';
+    ctx.strokeRect(wall.x + 1.5, wall.y + 1.5, BUILD_CELL - 3, BUILD_CELL - 3);
+  }
+
+  for (const fuel of sim.fuels) {
+    const gx0 = Math.floor(fuel.x / H);
+    const gy0 = Math.floor(fuel.y / H);
+    let raw = 0;
+    let char = 0;
+    let ash = 0;
+    for (let gy = gy0; gy < Math.min(NY, gy0 + 2); gy += 1) {
+      for (let gx = gx0; gx < Math.min(NX, gx0 + 2); gx += 1) {
+        const i = gy * NX + gx;
+        raw += sim.rawStraw[i];
+        char += sim.char[i];
+        ash += sim.ash[i];
+      }
+    }
+    const total = raw + char + ash;
+    const charRatio = total > 1e-6 ? char / total : 0;
+    const ashRatio = total > 1e-6 ? ash / total : 0;
+    const light = Math.max(16, 54 - charRatio * 34 + ashRatio * 20);
+    ctx.fillStyle = `hsl(30 45% ${light}%)`;
+    ctx.fillRect(fuel.x + 3, fuel.y + 3, BUILD_CELL - 6, BUILD_CELL - 6);
+    ctx.strokeStyle = '#3f2a1d';
+    ctx.strokeRect(fuel.x + 3.5, fuel.y + 3.5, BUILD_CELL - 7, BUILD_CELL - 7);
+  }
 }
 
-const presetContainer = document.querySelector<HTMLDivElement>('#presets')!;
-presetContainer.innerHTML = Object.entries(presets)
-  .map(([key, preset]) => `<button data-preset="${key}">${preset.label}</button>`)
+function canvasPoint(event: PointerEvent) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) * SIM_WIDTH / rect.width,
+    y: (event.clientY - rect.top) * SIM_HEIGHT / rect.height,
+  };
+}
+
+function applyTool(event: PointerEvent) {
+  const p = canvasPoint(event);
+  sim.setToolAt(selectedTool, p.x, p.y);
+  drawField();
+  renderMetrics();
+}
+
+canvas.addEventListener('pointerdown', (event) => {
+  drawing = true;
+  canvas.setPointerCapture(event.pointerId);
+  applyTool(event);
+});
+canvas.addEventListener('pointermove', (event) => {
+  if (drawing) applyTool(event);
+});
+canvas.addEventListener('pointerup', () => { drawing = false; });
+canvas.addEventListener('pointercancel', () => { drawing = false; });
+
+document.querySelector('#tool-grid')!.addEventListener('click', (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-tool]');
+  if (!button?.dataset.tool) return;
+  selectedTool = button.dataset.tool;
+  document.querySelectorAll<HTMLButtonElement>('[data-tool]').forEach((item) => {
+    item.classList.toggle('active', item === button);
+  });
+});
+
+presetGrid.innerHTML = Object.entries(STOVE_PRESETS)
+  .map(([id, preset]) => `<button data-preset="${id}"><strong>${preset.label}</strong><small>${preset.description}</small></button>`)
   .join('');
-presetContainer.addEventListener('click', (event) => {
-  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-preset]');
-  if (button?.dataset.preset) setPreset(button.dataset.preset);
-});
 
-for (const el of [temperatureInput, oxygenInput, mixingInput, residenceInput]) {
-  el.addEventListener('input', render);
+function loadPreset(id: string) {
+  if (!sim.loadPreset(id)) return;
+  selectedPreset = id;
+  const preset = STOVE_PRESETS[id as keyof typeof STOVE_PRESETS];
+  presetDescription.textContent = preset.description;
+  presetGrid.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.preset === id);
+  });
+  pauseButton.textContent = '暫停';
+  drawField();
+  renderMetrics();
 }
 
-toggleButton.addEventListener('click', () => {
-  running = !running;
-  toggleButton.textContent = running ? '暫停' : '繼續';
+presetGrid.addEventListener('click', (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-preset]');
+  if (button?.dataset.preset) loadPreset(button.dataset.preset);
 });
-resetButton.addEventListener('click', resetSimulation);
 
-setPreset(selectedPreset);
-requestAnimationFrame(tick);
+igniteButton.addEventListener('click', () => sim.ignite());
+pauseButton.addEventListener('click', () => {
+  sim.pause();
+  pauseButton.textContent = sim.running ? '暫停' : '繼續';
+});
+resetButton.addEventListener('click', () => loadPreset(selectedPreset));
+clearButton.addEventListener('click', () => {
+  sim.clearScene();
+  drawField();
+  renderMetrics();
+});
+speedInput.addEventListener('input', () => {
+  speedValue.value = `${speedInput.value}×`;
+});
+
+function frame(now: number) {
+  const elapsed = Math.min(0.08, (now - lastFrame) / 1000);
+  lastFrame = now;
+  accumulator += elapsed * Number(speedInput.value);
+  let guard = 0;
+  while (accumulator >= DT && guard < 8) {
+    sim.step(DT);
+    accumulator -= DT;
+    guard += 1;
+  }
+  drawField();
+  renderMetrics();
+  requestAnimationFrame(frame);
+}
+
+loadPreset(selectedPreset);
+requestAnimationFrame(frame);
