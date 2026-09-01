@@ -1,6 +1,4 @@
 import {
-  AMBIENT_O2,
-  AMBIENT_T,
   CpuRocketSimulation,
   H,
   NX,
@@ -23,16 +21,12 @@ export type BackendStatus = {
 type StatusListener = (status: BackendStatus) => void;
 
 /**
- * Phase 3C browser coordinator.
+ * Phase 4 browser coordinator.
  *
- * Ownership contract while fuel chemistry is still CPU-only:
- * - CPU owns geometry, finite-fuel transformation, cooling, secondary reaction,
- *   open-boundary scalar exchange, diagnostics and tracers.
- * - GPU owns one transport slice: buoyancy, velocity advection/projection and
- *   wall-safe scalar advection.
- * - One CPU->GPU upload and one GPU->CPU state handoff happen per physics tick.
- * - Rendering never performs its own GPU readback; it consumes the synchronized
- *   CPU arrays, so requestAnimationFrame remains independent from WebGPU I/O.
+ * GPU mode owns Physics v3 fuel transformation, airflow, scalar transport,
+ * cooling/residence, secondary combustion and open-boundary scalar exchange.
+ * CPU remains the synchronized presentation/oracle mirror for diagnostics,
+ * Canvas2D rendering and tracer particles until those are migrated later.
  */
 export class BrowserSimulationController {
   readonly cpu: CpuRocketSimulation;
@@ -44,6 +38,7 @@ export class BrowserSimulationController {
   private fallback = false;
   private activeStep: Promise<void> | null = null;
   private listeners = new Set<StatusListener>();
+  private gpuStateDirty = true;
 
   constructor() {
     this.cpu = new CpuRocketSimulation();
@@ -54,7 +49,7 @@ export class BrowserSimulationController {
     return {
       requested: this.requested,
       effective: this.effective,
-      label: this.effective === 'gpu' ? 'GPU · VGPU/WebGPU transport' : 'CPU · Physics v3 reference',
+      label: this.effective === 'gpu' ? 'GPU · VGPU Physics v3' : 'CPU · Physics v3 reference',
       detail: this.detail,
       gpuAvailable,
       fallback: this.fallback,
@@ -96,11 +91,12 @@ export class BrowserSimulationController {
 
     try {
       await this.ensureGpu();
-      this.uploadCpuTransportState();
+      this.uploadCpuFullState();
+      this.gpuStateDirty = false;
       this.effective = 'gpu';
       this.detail = preference === 'gpu'
-        ? 'GPU transport selected. CPU still owns fuel chemistry and tracers.'
-        : 'Auto selected GPU transport. CPU remains the Physics v3 reaction oracle.';
+        ? 'GPU Physics v3 selected. Fuel reactions and transport run on VGPU/WebGPU; CPU mirrors results for rendering and tracers.'
+        : 'Auto selected GPU Physics v3. CPU remains the synchronized reference/render mirror.';
     } catch (error) {
       this.disposeGpu();
       this.effective = 'cpu';
@@ -117,7 +113,7 @@ export class BrowserSimulationController {
     if (this.activeStep) return this.activeStep;
 
     const task = this.effective === 'gpu'
-      ? this.stepGpuTransport(dt)
+      ? this.stepGpuPhysics(dt)
       : this.stepCpu(dt);
     this.activeStep = task.finally(() => {
       this.activeStep = null;
@@ -126,15 +122,19 @@ export class BrowserSimulationController {
   }
 
   loadPreset(id: string): boolean {
-    return this.cpu.loadPreset(id);
+    const loaded = this.cpu.loadPreset(id);
+    if (loaded) this.gpuStateDirty = true;
+    return loaded;
   }
 
   clearScene(): void {
     this.cpu.clearScene();
+    this.gpuStateDirty = true;
   }
 
   setToolAt(tool: string, x: number, y: number): void {
     this.cpu.setToolAt(tool, x, y);
+    this.gpuStateDirty = true;
   }
 
   ignite(): void {
@@ -154,28 +154,37 @@ export class BrowserSimulationController {
     this.cpu.step(dt);
   }
 
-  private async stepGpuTransport(dt: number): Promise<void> {
+  private async stepGpuPhysics(dt: number): Promise<void> {
     const gpu = this.gpu;
     if (!gpu) {
-      this.effective = 'cpu';
-      this.fallback = true;
-      this.detail = 'GPU backend was not initialized; CPU fallback active.';
-      this.emitStatus();
+      this.fallbackToCpu('GPU backend was not initialized; CPU fallback active.');
       this.cpu.step(dt);
       return;
     }
 
-    // Reproduce the CPU oracle order up to the transport boundary.
-    this.cpu.time += dt;
-    this.cpu.applyFuelTransformation(dt);
+    const previousTime = this.cpu.time;
+    const previousIgnitionRemaining = this.cpu.ignitionRemaining;
 
     try {
-      this.uploadCpuTransportState();
-      gpu.stepTransport(dt);
+      if (this.gpuStateDirty) {
+        this.uploadCpuFullState();
+        this.gpuStateDirty = false;
+      }
 
-      const [velocity, scalars] = await Promise.all([
+      this.cpu.time += dt;
+      const ignitionActive = this.cpu.ignitionRemaining > 0;
+      if (ignitionActive) {
+        this.cpu.ignitionRemaining = Math.max(0, this.cpu.ignitionRemaining - dt);
+      }
+
+      gpu.stepPhysics(dt, { ignitionActive });
+
+      const [velocity, scalars, fuel, outflow, secondaryReacted] = await Promise.all([
         gpu.readVelocity(),
         gpu.readScalarState(),
+        gpu.readFuelState(),
+        gpu.readScalarOutflowTotal(),
+        gpu.readSecondaryReactionTotal(),
       ]);
 
       this.cpu.u.set(velocity.u);
@@ -186,59 +195,49 @@ export class BrowserSimulationController {
       this.cpu.volatileGas.set(scalars.volatileGas);
       this.cpu.exhaustGas.set(scalars.exhaustGas);
       this.cpu.secondaryResidence.set(scalars.secondaryResidence);
+      this.cpu.rawStraw.set(fuel.rawStraw);
+      this.cpu.char.set(fuel.char);
+      this.cpu.mineralMatter.set(fuel.mineralMatter);
+      this.cpu.ash.set(fuel.ash);
 
+      this.updateCpuReactionDiagnostics(outflow, secondaryReacted, dt);
       this.cpu.lastPressureResidual = this.estimateVelocityResidual();
       this.cpu.measureBoundaryFlux();
-
-      // Continue with the CPU-owned half of the Physics v3 operator split.
-      this.cpu.coolAndMix(dt);
-      this.cpu.updateSecondaryResidence(dt);
-      this.cpu.applySecondaryCombustion(dt);
-      this.cpu.applyOpenBoundaryExchange(dt);
       this.cpu.updateTracers(dt);
     } catch (error) {
-      // CPU is still at the post-fuel/pre-transport point. Complete the same
-      // tick on CPU rather than dropping or double-applying fuel chemistry.
-      this.completeCpuTransportFromCurrentState(dt);
+      // CPU arrays still represent the last completed tick because all GPU
+      // readbacks are applied only after Promise.all succeeds. Restore the two
+      // scalar clock values and execute the same tick once on CPU.
+      this.cpu.time = previousTime;
+      this.cpu.ignitionRemaining = previousIgnitionRemaining;
       this.disposeGpu();
-      this.effective = 'cpu';
-      this.fallback = true;
-      this.detail = `GPU runtime failed; the current tick completed on CPU and fallback is now active. ${this.describeError(error)}`;
-      this.emitStatus();
+      this.fallbackToCpu(
+        `GPU runtime failed; the current tick was recomputed once on CPU. ${this.describeError(error)}`
+      );
+      this.cpu.step(dt);
     }
   }
 
-  private completeCpuTransportFromCurrentState(dt: number): void {
-    this.cpu.addBuoyancy(dt);
+  private updateCpuReactionDiagnostics(
+    outflow: { smokeOut: number; volatileOut: number },
+    secondaryReacted: number,
+    dt: number,
+  ): void {
+    const raw = this.cpu.sum(this.cpu.rawStraw);
+    const charMass = this.cpu.sum(this.cpu.char);
+    const pyrolyzed = Math.max(0, this.cpu.initialOrganic - raw);
 
-    this.cpu.uPrev.set(this.cpu.u);
-    this.cpu.vPrev.set(this.cpu.v);
-    this.cpu.advectField(this.cpu.u, this.cpu.uPrev, this.cpu.uPrev, this.cpu.vPrev, dt, 0, false);
-    this.cpu.advectField(this.cpu.v, this.cpu.vPrev, this.cpu.uPrev, this.cpu.vPrev, dt, 0, false);
-    this.cpu.projectVelocity();
-
-    this.cpu.temperaturePrev.set(this.cpu.temperature);
-    this.cpu.oxygenPrev.set(this.cpu.oxygen);
-    this.cpu.smokePrev.set(this.cpu.smoke);
-    this.cpu.volatilePrev.set(this.cpu.volatileGas);
-    this.cpu.exhaustPrev.set(this.cpu.exhaustGas);
-    this.cpu.secondaryResidencePrev.set(this.cpu.secondaryResidence);
-
-    this.cpu.advectField(this.cpu.temperature, this.cpu.temperaturePrev, this.cpu.u, this.cpu.v, dt, AMBIENT_T, true);
-    this.cpu.advectField(this.cpu.oxygen, this.cpu.oxygenPrev, this.cpu.u, this.cpu.v, dt, AMBIENT_O2, true);
-    this.cpu.advectField(this.cpu.smoke, this.cpu.smokePrev, this.cpu.u, this.cpu.v, dt, 0, true);
-    this.cpu.advectField(this.cpu.volatileGas, this.cpu.volatilePrev, this.cpu.u, this.cpu.v, dt, 0, true);
-    this.cpu.advectField(this.cpu.exhaustGas, this.cpu.exhaustPrev, this.cpu.u, this.cpu.v, dt, 0, true);
-    this.cpu.advectField(this.cpu.secondaryResidence, this.cpu.secondaryResidencePrev, this.cpu.u, this.cpu.v, dt, 0, true);
-
-    this.cpu.coolAndMix(dt);
-    this.cpu.updateSecondaryResidence(dt);
-    this.cpu.applySecondaryCombustion(dt);
-    this.cpu.applyOpenBoundaryExchange(dt);
-    this.cpu.updateTracers(dt);
+    this.cpu.pyrolyzedTotal = pyrolyzed;
+    this.cpu.charGeneratedTotal = pyrolyzed * 0.34;
+    this.cpu.volatileGeneratedTotal = pyrolyzed * 0.66;
+    this.cpu.charBurnedTotal = Math.max(0, this.cpu.charGeneratedTotal - charMass);
+    this.cpu.smokeOutTotal += Math.max(0, outflow.smokeOut);
+    this.cpu.volatileOutTotal += Math.max(0, outflow.volatileOut);
+    this.cpu.smokeOxidizedTotal += Math.max(0, secondaryReacted);
+    this.cpu.lastSecondaryRate = Math.max(0, secondaryReacted) / Math.max(dt, 1e-6);
   }
 
-  private uploadCpuTransportState(): void {
+  private uploadCpuFullState(): void {
     const gpu = this.gpu;
     if (!gpu) throw new Error('GPU backend is not initialized');
     gpu.uploadAirflowState({
@@ -251,6 +250,11 @@ export class BrowserSimulationController {
       volatileGas: this.cpu.volatileGas,
       exhaustGas: this.cpu.exhaustGas,
       secondaryResidence: this.cpu.secondaryResidence,
+      fuelMask: this.cpu.fuelMask,
+      rawStraw: this.cpu.rawStraw,
+      char: this.cpu.char,
+      mineralMatter: this.cpu.mineralMatter,
+      ash: this.cpu.ash,
     });
   }
 
@@ -264,6 +268,14 @@ export class BrowserSimulationController {
   private disposeGpu(): void {
     this.gpu?.dispose();
     this.gpu = null;
+    this.gpuStateDirty = true;
+  }
+
+  private fallbackToCpu(detail: string): void {
+    this.effective = 'cpu';
+    this.fallback = true;
+    this.detail = detail;
+    this.emitStatus();
   }
 
   private estimateVelocityResidual(): number {
