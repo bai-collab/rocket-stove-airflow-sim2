@@ -18,6 +18,7 @@ export class GpuFieldRegistry {
   readonly velocity: ReturnType<typeof pingPongStorage>;
   readonly pressure: ReturnType<typeof pingPongStorage>;
   readonly divergence: StorageBuffer;
+  readonly boundaryFlux: ReturnType<typeof pingPongStorage>;
 
   constructor(gpu: Gpu, cellCount: number) {
     this.cellCount = cellCount;
@@ -26,6 +27,7 @@ export class GpuFieldRegistry {
     this.velocity = pingPongStorage(gpu, cellCount * 8);
     this.pressure = pingPongStorage(gpu, cellCount * 4);
     this.divergence = storage(gpu, cellCount * 4, 'read-write');
+    this.boundaryFlux = pingPongStorage(gpu, cellCount * 8);
   }
 
   upload(snapshot: CpuAirflowSnapshot): void {
@@ -48,6 +50,7 @@ export class GpuFieldRegistry {
     this.velocity.read.write(velocity);
     this.velocity.write.write(velocity);
     this.resetPressure();
+    this.resetBoundaryFlux();
   }
 
   resetPressure(): void {
@@ -55,6 +58,12 @@ export class GpuFieldRegistry {
     this.pressure.read.write(zero);
     this.pressure.write.write(zero);
     this.divergence.write(zero);
+  }
+
+  resetBoundaryFlux(): void {
+    const zero = new Float32Array(this.cellCount * 2);
+    this.boundaryFlux.read.write(zero);
+    this.boundaryFlux.write.write(zero);
   }
 
   async readVelocity(): Promise<{ u: Float32Array; v: Float32Array }> {
@@ -76,6 +85,11 @@ export class GpuFieldRegistry {
     return new Float32Array(await this.divergence.read());
   }
 
+  async readBoundaryFluxTotal(): Promise<{ netOutward: number; faceCount: number }> {
+    const values = new Float32Array(await this.boundaryFlux.read.read());
+    return { netOutward: values[0] ?? 0, faceCount: values[1] ?? 0 };
+  }
+
   resetVelocity(): void {
     const zero = new Float32Array(this.cellCount * 2);
     this.velocity.read.write(zero);
@@ -90,6 +104,8 @@ export class GpuFieldRegistry {
     this.pressure.read.destroy();
     this.pressure.write.destroy();
     this.divergence.destroy();
+    this.boundaryFlux.read.destroy();
+    this.boundaryFlux.write.destroy();
   }
 
   private assertLength(value: ArrayLike<number>, name: string): void {
