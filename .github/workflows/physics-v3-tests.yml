@@ -35,6 +35,10 @@ jobs:
         continue-on-error: true
         run: npx vgpu check src/gpu/shaders/scalar/open-boundary-exchange.wgsl
 
+      - name: Diagnose fuel module harness
+        continue-on-error: true
+        run: npx vgpu check src/gpu/shaders/fuel/scaffold-check.wgsl
+
       - name: Validate all WGSL
         run: npm run check:wgsl
 
