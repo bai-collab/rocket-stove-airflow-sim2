@@ -1,7 +1,7 @@
 {
   "name": "rocket-stove-airflow-sim2",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
