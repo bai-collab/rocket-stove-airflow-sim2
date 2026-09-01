@@ -24,8 +24,8 @@ fn freshen_k(normal_speed: f32) -> f32 {
   return clamp(rate * params.dt, 0.0, 1.0);
 }
 
-fn mix_toward(value: f32, target: f32, k: f32) -> f32 {
-  return value + (target - value) * k;
+fn mix_toward(value: f32, target_value: f32, k: f32) -> f32 {
+  return value + (target_value - value) * k;
 }
 
 @compute @workgroup_size(64)
