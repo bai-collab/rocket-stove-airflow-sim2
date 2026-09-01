@@ -7,9 +7,10 @@ project:
 status:
   repository_creation: completed
   old_repository_modified: false
-  phase: phase_3b_gpu_scalar_transport_complete
-  live_browser_backend: cpu
-  gpu_backend_authority: airflow_and_scalar_parity_verified
+  phase: phase_3c_browser_backend_switch_complete
+  live_browser_backend: auto_cpu_or_hybrid_gpu_transport
+  gpu_backend_authority: airflow_and_scalar_transport_parity_verified
+  cpu_backend_authority: physics_v3_reaction_oracle
   ci: passing
 
 implemented:
@@ -91,6 +92,58 @@ implemented:
     - Physics v3 metrics panel
     - carbonization indicators
     - advanced airflow diagnostics
+    - Auto / CPU / GPU backend selector
+    - selected backend persisted in localStorage
+    - live backend status pill
+    - WebGPU unavailable fallback messaging
+
+  browser_backend_controller:
+    file: src/simulation/BrowserSimulationController.ts
+    preferences:
+      auto:
+        behavior: prefer GPU transport when browser WebGPU initializes successfully; otherwise CPU fallback
+      cpu:
+        behavior: force Physics v3 CPU reference
+      gpu:
+        behavior: request VGPU/WebGPU transport; fall back to CPU if unavailable or runtime fails
+    ownership:
+      cpu:
+        - geometry and editing state
+        - finite straw / char / mineral / ash state
+        - pyrolysis and primary fuel transformation
+        - cooling and scalar clamping
+        - secondary residence reaction update
+        - secondary combustion
+        - open-boundary scalar exchange in live browser hybrid mode
+        - diagnostics
+        - tracer particles
+        - Canvas2D rendering source arrays
+      gpu:
+        - buoyancy transport pass
+        - velocity advection
+        - divergence
+        - pressure Jacobi
+        - pressure projection
+        - global open-boundary velocity flux correction
+        - wall-safe scalar advection
+    synchronization:
+      - one CPU-to-GPU upload per GPU physics tick
+      - one GPU-to-CPU airflow/scalar handoff per GPU physics tick
+      - no requestAnimationFrame-specific GPU readback
+      - rendering reads synchronized CPU arrays only
+      - backend switch waits for any active physics tick to finish
+      - GPU runtime failure completes the current partially-started tick on CPU before fallback
+    operator_order:
+      gpu_step_transport:
+        - fuel transformation remains on CPU before GPU handoff
+        - GPU buoyancy / airflow / scalar advection
+        - GPU state readback to CPU
+        - CPU cooling
+        - CPU secondary residence update
+        - CPU secondary combustion
+        - CPU open-boundary exchange
+        - CPU tracer update
+      rationale: preserve the established CPU Physics v3 reaction/boundary ordering while fuel chemistry is not yet GPU-owned
 
   vgpu:
     integration:
@@ -99,6 +152,7 @@ implemented:
       - strict TypeScript typecheck
       - typed GPU field registry
       - browser VGPU initialization backend
+      - transport-only browser stepTransport entry point
     storage:
       - solid mask
       - velocity ping-pong
@@ -125,9 +179,9 @@ implemented:
       - wall-safe semi-Lagrangian scalar advection
       - ambient fallback only when backtrace exits the canvas
       - solid-wall backtrace isolation
-      - open-boundary fresh-air exchange
-      - ambient temperature and oxygen mixing
-      - smoke/volatile/exhaust dilution on inflow
+      - open-boundary fresh-air exchange kernel retained for parity/future full-GPU pipeline
+      - ambient temperature and oxygen mixing kernel retained for parity/future full-GPU pipeline
+      - smoke/volatile/exhaust dilution kernel retained for parity/future full-GPU pipeline
       - smoke and volatile-gas outflow statistics
       - GPU vec2 outflow reduction
     fuel_scaffolds:
@@ -145,12 +199,17 @@ validation:
     vgpu_airflow_gpu_parity: success
     vgpu_scalar_gpu_parity: success
     vite_production_build: success
+  browser_runtime:
+    compile_and_bundle: verified
+    real_end_user_webgpu_device_matrix: not_automated_yet
+    visual_cpu_gpu_parity: manual_or_future_browser_test
   policy:
-    - CPU Physics v3 remains the oracle during migration
-    - GPU readback is used in tests/diagnostics, not the hot browser loop
+    - CPU Physics v3 remains the chemistry/reaction oracle during migration
+    - GPU mode in Phase 3C means hybrid GPU transport, not full-GPU Physics v3
     - sealed regions never receive ambient scalar refill through walls
     - open-boundary exchange occurs only on actual canvas boundary faces
-    - browser remains CPU until Phase 3C defines stable CPU/GPU state ownership
+    - browser rendering does not trigger extra GPU readback
+    - CPU fallback is mandatory when WebGPU initialization or runtime execution fails
 
 completed:
   phase_3b_gpu_scalar_fields:
@@ -163,15 +222,28 @@ completed:
     - independent WGSL validation matrix
     - real software-adapter GPU compute/readback CI
 
-next:
   phase_3c_browser_backend_switch:
-    - design CPU/GPU state ownership boundary
-    - add auto/cpu/gpu selector
+    - define CPU/GPU state ownership boundary
+    - add Auto / CPU / GPU selector
+    - Auto prefers GPU when WebGPU initializes successfully
     - preserve CPU fallback when WebGPU unavailable
-    - avoid per-frame GPU readback for rendering/tracers
-    - add browser smoke/oxygen/temperature visual parity checks
+    - preserve CPU fallback after GPU runtime failure
+    - persist backend preference
+    - asynchronous physics pump avoids blocking requestAnimationFrame
+    - no rendering-specific per-frame GPU readback
+    - preserve CPU Physics v3 operator order in hybrid mode
+
+next:
+  phase_4_gpu_fuel_transformation:
+    - migrate pyrolysis to WGSL
+    - migrate volatile primary combustion to WGSL
+    - migrate char oxidation to WGSL
+    - migrate cooling and secondary combustion to WGSL
+    - move open-boundary scalar exchange into the live GPU pipeline after reactions migrate
+    - reduce CPU-GPU synchronization cost
+    - add full Physics v3 CPU/GPU conservation parity
 
   later:
-    - migrate Physics v3 fuel transformation
     - migrate tracer particles
     - migrate GPU field rendering
+    - automate browser WebGPU device/visual parity tests
