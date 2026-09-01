@@ -24,5 +24,11 @@ jobs:
       - name: Run CPU physics invariants
         run: npm test
 
+      - name: Validate WGSL
+        run: npm run check:wgsl
+
+      - name: Run VGPU buoyancy parity
+        run: npm run test:gpu
+
       - name: Build Vite app
         run: npm run build
