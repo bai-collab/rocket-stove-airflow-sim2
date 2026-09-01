@@ -25,6 +25,11 @@ jobs:
           - src/gpu/shaders/scalar/advect-scalar.wgsl
           - src/gpu/shaders/scalar/open-boundary-exchange.wgsl
           - src/gpu/shaders/fuel/scaffold-check.wgsl
+          - src/gpu/shaders/fuel/pyrolysis-pass.wgsl
+          - src/gpu/shaders/fuel/volatile-combustion.wgsl
+          - src/gpu/shaders/fuel/char-oxidation-pass.wgsl
+          - src/gpu/shaders/combustion/cooling-residence.wgsl
+          - src/gpu/shaders/combustion/secondary-combustion.wgsl
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -69,7 +74,7 @@ jobs:
           VGPU_ADAPTER: software
         run: npx --no-install vgpu doctor --pretty
 
-      - name: Run VGPU airflow and scalar parity
+      - name: Run VGPU Physics v3 parity
         env:
           VGPU_ADAPTER: software
         run: npm run test:gpu
