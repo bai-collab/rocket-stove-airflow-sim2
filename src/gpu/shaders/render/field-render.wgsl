@@ -33,8 +33,8 @@ fn distance_to_segment(p: vec2f, a: vec2f, b: vec2f) -> f32 {
 }
 
 fn velocity_overlay(px: vec2f) -> f32 {
-  let macro = params.h * 4.0;
-  let block = floor(px / macro) * macro;
+  let macro_size = params.h * 4.0;
+  let block = floor(px / macro_size) * macro_size;
   let center = block + vec2f(params.h * 2.5);
   if (center.x >= params.sim_width || center.y >= params.sim_height) {
     return 0.0;
