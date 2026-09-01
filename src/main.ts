@@ -1,7 +1,6 @@
 import './style.css';
 import {
   AMBIENT_T,
-  CpuRocketSimulation,
   DT,
   H,
   NX,
@@ -9,6 +8,11 @@ import {
   SIM_HEIGHT,
   SIM_WIDTH,
 } from './simulation/CpuRocketSimulation.mjs';
+import {
+  BrowserSimulationController,
+  type BackendPreference,
+  type BackendStatus,
+} from './simulation/BrowserSimulationController';
 import { BUILD_CELL, STOVE_PRESETS } from './simulation/presets.mjs';
 
 const app = document.querySelector<HTMLDivElement>('#app');
@@ -18,11 +22,11 @@ app.innerHTML = `
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <p class="eyebrow">Physics v3 · Phase 2</p>
+        <p class="eyebrow">Physics v3 · Phase 3C</p>
         <h1>火箭爐空氣流動與稻稈碳化模擬器</h1>
         <p>設計 → 點火 → 觀察氣流／黑煙／碳化 → 修改 → 再測試</p>
       </div>
-      <div class="status-pill">CPU airflow reference · VGPU migration pending</div>
+      <div id="backend-status" class="status-pill">正在偵測運算後端…</div>
     </header>
 
     <section class="workspace">
@@ -41,6 +45,16 @@ app.innerHTML = `
           <button id="pause">暫停</button>
           <button id="reset">重新載入爐型</button>
           <button id="clear">全部清除</button>
+        </div>
+
+        <div class="backend-control">
+          <label for="backend-select">運算後端</label>
+          <select id="backend-select">
+            <option value="auto">自動（推薦）</option>
+            <option value="cpu">CPU · Physics v3</option>
+            <option value="gpu">GPU · VGPU/WebGPU</option>
+          </select>
+          <p id="backend-detail" class="backend-detail">偵測 WebGPU 中…</p>
         </div>
 
         <label class="range-label" for="speed">模擬速度 <output id="speed-value">1×</output></label>
@@ -62,7 +76,7 @@ app.innerHTML = `
           <div id="preset-grid" class="preset-grid"></div>
           <p id="preset-description" class="hint"></p>
         </div>
-        <p class="model-note">Physics v3：稻稈是有限燃料。受熱後先熱裂解成揮發性氣體與炭；黑煙只有在高溫、含氧、充分混合並具有停留時間時才可進一步氧化。灰分來自燃料原有礦物質留下，不代表「碳變成灰」。</p>
+        <p class="model-note">Physics v3：稻稈是有限燃料。受熱後先熱裂解成揮發性氣體與炭；黑煙只有在高溫、含氧、充分混合並具有停留時間時才可進一步氧化。灰分來自燃料原有礦物質留下，不代表「碳變成灰」。Phase 3C 的 GPU 模式目前加速氣流與標量傳輸；燃料反應、二次燃燒、邊界交換與 tracer 仍由 CPU Physics v3 oracle 管理。</p>
       </section>
 
       <aside class="panel metrics-panel">
@@ -91,13 +105,31 @@ const resetButton = document.querySelector<HTMLButtonElement>('#reset')!;
 const clearButton = document.querySelector<HTMLButtonElement>('#clear')!;
 const speedInput = document.querySelector<HTMLInputElement>('#speed')!;
 const speedValue = document.querySelector<HTMLOutputElement>('#speed-value')!;
+const backendSelect = document.querySelector<HTMLSelectElement>('#backend-select')!;
+const backendStatus = document.querySelector<HTMLDivElement>('#backend-status')!;
+const backendDetail = document.querySelector<HTMLParagraphElement>('#backend-detail')!;
 
-const sim = new CpuRocketSimulation();
+const controller = new BrowserSimulationController();
+const sim = controller.cpu;
 let selectedTool = 'wall';
 let selectedPreset = 'straight';
 let drawing = false;
 let lastFrame = performance.now();
 let accumulator = 0;
+let physicsBusy = false;
+
+function isBackendPreference(value: string | null): value is BackendPreference {
+  return value === 'auto' || value === 'cpu' || value === 'gpu';
+}
+
+function renderBackendStatus(status: BackendStatus) {
+  backendStatus.textContent = `${status.label}${status.fallback ? ' · fallback' : ''}`;
+  backendStatus.classList.toggle('gpu', status.effective === 'gpu');
+  backendStatus.classList.toggle('fallback', status.fallback);
+  backendDetail.textContent = status.detail;
+}
+
+controller.subscribe(renderBackendStatus);
 
 function metric(label: string, value: string) {
   return `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`;
@@ -129,6 +161,7 @@ function renderMetrics() {
   ].join('');
 
   advanced.innerHTML = [
+    metric('運算後端', controller.status.effective.toUpperCase()),
     metric('二次燃燒速率', d.secondaryRate.toExponential(2)),
     metric('壓力投影殘差', d.pressureResidual.toExponential(2)),
     metric('邊界進流', d.inflow.toFixed(2)),
@@ -249,7 +282,7 @@ function canvasPoint(event: PointerEvent) {
 
 function applyTool(event: PointerEvent) {
   const p = canvasPoint(event);
-  sim.setToolAt(selectedTool, p.x, p.y);
+  controller.setToolAt(selectedTool, p.x, p.y);
   drawField();
   renderMetrics();
 }
@@ -279,7 +312,7 @@ presetGrid.innerHTML = Object.entries(STOVE_PRESETS)
   .join('');
 
 function loadPreset(id: string) {
-  if (!sim.loadPreset(id)) return;
+  if (!controller.loadPreset(id)) return;
   selectedPreset = id;
   const preset = STOVE_PRESETS[id as keyof typeof STOVE_PRESETS];
   presetDescription.textContent = preset.description;
@@ -287,6 +320,7 @@ function loadPreset(id: string) {
     button.classList.toggle('active', button.dataset.preset === id);
   });
   pauseButton.textContent = '暫停';
+  accumulator = 0;
   drawField();
   renderMetrics();
 }
@@ -296,14 +330,15 @@ presetGrid.addEventListener('click', (event) => {
   if (button?.dataset.preset) loadPreset(button.dataset.preset);
 });
 
-igniteButton.addEventListener('click', () => sim.ignite());
+igniteButton.addEventListener('click', () => controller.ignite());
 pauseButton.addEventListener('click', () => {
-  sim.pause();
+  controller.pause();
   pauseButton.textContent = sim.running ? '暫停' : '繼續';
 });
 resetButton.addEventListener('click', () => loadPreset(selectedPreset));
 clearButton.addEventListener('click', () => {
-  sim.clearScene();
+  controller.clearScene();
+  accumulator = 0;
   drawField();
   renderMetrics();
 });
@@ -311,20 +346,49 @@ speedInput.addEventListener('input', () => {
   speedValue.value = `${speedInput.value}×`;
 });
 
+backendSelect.addEventListener('change', async () => {
+  const preference = backendSelect.value;
+  if (!isBackendPreference(preference)) return;
+  backendSelect.disabled = true;
+  try {
+    localStorage.setItem('rocket-stove-backend', preference);
+    await controller.setBackend(preference);
+    accumulator = 0;
+  } finally {
+    backendSelect.disabled = false;
+  }
+});
+
+async function advancePhysics() {
+  if (physicsBusy) return;
+  physicsBusy = true;
+  try {
+    let guard = 0;
+    while (accumulator >= DT && guard < 2) {
+      await controller.step(DT);
+      accumulator -= DT;
+      guard += 1;
+    }
+  } finally {
+    physicsBusy = false;
+  }
+}
+
 function frame(now: number) {
   const elapsed = Math.min(0.08, (now - lastFrame) / 1000);
   lastFrame = now;
-  accumulator += elapsed * Number(speedInput.value);
-  let guard = 0;
-  while (accumulator >= DT && guard < 8) {
-    sim.step(DT);
-    accumulator -= DT;
-    guard += 1;
-  }
+  accumulator = Math.min(DT * 6, accumulator + elapsed * Number(speedInput.value));
+  void advancePhysics();
   drawField();
   renderMetrics();
   requestAnimationFrame(frame);
 }
 
+const storedBackend = localStorage.getItem('rocket-stove-backend');
+const initialBackend: BackendPreference = isBackendPreference(storedBackend) ? storedBackend : 'auto';
+backendSelect.value = initialBackend;
 loadPreset(selectedPreset);
+await controller.initialize(initialBackend);
 requestAnimationFrame(frame);
+
+window.addEventListener('beforeunload', () => controller.dispose());
