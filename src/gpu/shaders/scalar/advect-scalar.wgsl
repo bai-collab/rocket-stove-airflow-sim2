@@ -35,8 +35,8 @@ fn is_solid_point(p: vec2f) -> bool {
 }
 
 // 0 = fluid, 1 = solid, 2 = outside canvas.
-fn trace_status(from: vec2f, to: vec2f) -> u32 {
-  let delta = to - from;
+fn trace_status(origin: vec2f, destination: vec2f) -> u32 {
+  let delta = destination - origin;
   let distance = length(delta);
   let steps = max(1u, u32(ceil(distance / max(params.trace_step, 0.0001))));
   var s = 1u;
@@ -45,7 +45,7 @@ fn trace_status(from: vec2f, to: vec2f) -> u32 {
       break;
     }
     let t = f32(s) / f32(steps);
-    let p = from + delta * t;
+    let p = origin + delta * t;
     if (!in_canvas(p)) {
       return 2u;
     }
@@ -113,11 +113,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
 
   let x = i % params.nx;
   let y = i / params.nx;
-  let from = vec2f((f32(x) + 0.5) * params.h, (f32(y) + 0.5) * params.h);
-  let back = from - velocity[i] * params.dt;
+  let origin = vec2f((f32(x) + 0.5) * params.h, (f32(y) + 0.5) * params.h);
+  let back = origin - velocity[i] * params.dt;
 
   if (params.wall_safe != 0u) {
-    let status = trace_status(from, back);
+    let status = trace_status(origin, back);
     if (status == 1u) {
       scalar_dst[i] = scalar_src[i];
       return;
