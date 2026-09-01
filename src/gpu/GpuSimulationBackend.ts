@@ -1,4 +1,14 @@
-import { compute, init, type Compute, type Gpu, type StorageBuffer } from 'vgpu';
+import {
+  compute,
+  draw,
+  effect,
+  frame,
+  init,
+  surface,
+  type Compute,
+  type Gpu,
+  type StorageBuffer,
+} from 'vgpu';
 import advectVelocityWgsl from './shaders/airflow/advect-velocity.wgsl';
 import boundaryFluxCorrectWgsl from './shaders/airflow/boundary-flux-correct.wgsl';
 import boundaryFluxStatsWgsl from './shaders/airflow/boundary-flux-stats.wgsl';
@@ -12,8 +22,11 @@ import secondaryCombustionWgsl from './shaders/combustion/secondary-combustion.w
 import charOxidationPassWgsl from './shaders/fuel/char-oxidation-pass.wgsl';
 import pyrolysisPassWgsl from './shaders/fuel/pyrolysis-pass.wgsl';
 import volatileCombustionWgsl from './shaders/fuel/volatile-combustion.wgsl';
+import fieldRenderWgsl from './shaders/render/field-render.wgsl';
+import tracerRenderWgsl from './shaders/render/tracer-render.wgsl';
 import advectScalarWgsl from './shaders/scalar/advect-scalar.wgsl';
 import openBoundaryExchangeWgsl from './shaders/scalar/open-boundary-exchange.wgsl';
+import tracerUpdateWgsl from './shaders/tracer/tracer-update.wgsl';
 import {
   GpuFieldRegistry,
   type CpuAirflowSnapshot,
@@ -32,6 +45,9 @@ export type GpuSimulationOptions = {
   nx: number;
   ny: number;
   h?: number;
+  simWidth?: number;
+  simHeight?: number;
+  tracerCount?: number;
   pressureIterations?: number;
   maxSpeed?: number;
   traceStep?: number;
@@ -39,6 +55,7 @@ export type GpuSimulationOptions = {
 
 export type GpuPhysicsStepOptions = {
   ignitionActive?: boolean;
+  simulationTime?: number;
 };
 
 type PingPongStorage = {
@@ -50,15 +67,18 @@ type PingPongStorage = {
 /**
  * VGPU Physics v3 backend.
  *
- * step() keeps the Phase 3B transport+boundary pipeline for parity tests.
- * stepTransport() keeps the Phase 3C transport-only entry point.
- * stepPhysics() is Phase 4: fuel reactions, transport, cooling/residence,
- * secondary combustion and open-boundary scalar exchange all execute on GPU.
+ * Phase 5 adds device-local tracer integration and direct WebGPU presentation.
+ * The same buffers used by compute passes are consumed by fullscreen field and
+ * instanced tracer draws, so presentation no longer requires a full-field CPU
+ * readback every physics tick.
  */
 export class GpuSimulationBackend implements SimulationBackend {
   private readonly nx: number;
   private readonly ny: number;
   private readonly h: number;
+  private readonly simWidth: number;
+  private readonly simHeight: number;
+  private readonly tracerCount: number;
   private readonly pressureIterations: number;
   private readonly maxSpeed: number;
   private readonly traceStep: number;
@@ -81,6 +101,10 @@ export class GpuSimulationBackend implements SimulationBackend {
   private charOxidationPass: Compute | null = null;
   private coolingResidence: Compute | null = null;
   private secondaryCombustion: Compute | null = null;
+  private tracerUpdate: Compute | null = null;
+  private renderSurface: ReturnType<typeof surface> | null = null;
+  private fieldEffect: ReturnType<typeof effect> | null = null;
+  private tracerDraw: ReturnType<typeof draw> | null = null;
   private initialized = false;
 
   constructor(options: GpuSimulationOptions) {
@@ -88,6 +112,9 @@ export class GpuSimulationBackend implements SimulationBackend {
       nx,
       ny,
       h = 12,
+      simWidth = nx * h,
+      simHeight = ny * h,
+      tracerCount = 320,
       pressureIterations = 36,
       maxSpeed = 180,
       traceStep = Math.max(2, h * 0.35),
@@ -96,16 +123,19 @@ export class GpuSimulationBackend implements SimulationBackend {
       throw new RangeError('nx and ny must be positive integers');
     }
     if (
-      !(h > 0) ||
+      !(h > 0) || !(simWidth > 0) || !(simHeight > 0) ||
+      !Number.isInteger(tracerCount) || tracerCount <= 0 ||
       !Number.isInteger(pressureIterations) || pressureIterations <= 0 ||
-      !(maxSpeed > 0) ||
-      !(traceStep > 0)
+      !(maxSpeed > 0) || !(traceStep > 0)
     ) {
-      throw new RangeError('h, pressureIterations, maxSpeed and traceStep must be positive');
+      throw new RangeError('GPU simulation dimensions/counts must be positive');
     }
     this.nx = nx;
     this.ny = ny;
     this.h = h;
+    this.simWidth = simWidth;
+    this.simHeight = simHeight;
+    this.tracerCount = tracerCount;
     this.pressureIterations = pressureIterations;
     this.maxSpeed = maxSpeed;
     this.traceStep = traceStep;
@@ -115,7 +145,7 @@ export class GpuSimulationBackend implements SimulationBackend {
   async initialize(): Promise<void> {
     if (this.initialized) return;
     this.gpu = await init();
-    this.fields = new GpuFieldRegistry(this.gpu, this.cellCount);
+    this.fields = new GpuFieldRegistry(this.gpu, this.cellCount, this.tracerCount);
     this.buoyancy = compute(this.gpu, buoyancyWgsl, { label: 'rocket-stove-airflow:buoyancy' });
     this.advectVelocity = compute(this.gpu, advectVelocityWgsl, { label: 'rocket-stove-airflow:advect-velocity' });
     this.divergence = compute(this.gpu, divergenceWgsl, { label: 'rocket-stove-airflow:divergence' });
@@ -131,11 +161,28 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.charOxidationPass = compute(this.gpu, charOxidationPassWgsl, { label: 'rocket-stove-airflow:char-oxidation' });
     this.coolingResidence = compute(this.gpu, coolingResidenceWgsl, { label: 'rocket-stove-airflow:cooling-residence' });
     this.secondaryCombustion = compute(this.gpu, secondaryCombustionWgsl, { label: 'rocket-stove-airflow:secondary-combustion' });
+    this.tracerUpdate = compute(this.gpu, tracerUpdateWgsl, { label: 'rocket-stove-airflow:tracer-update' });
     this.initialized = true;
+  }
+
+  attachRenderCanvas(canvas: HTMLCanvasElement): void {
+    const gpu = this.requireGpu();
+    this.renderSurface = surface(gpu, canvas, { dpr: [1, 2] });
+    this.fieldEffect = effect(gpu, fieldRenderWgsl, { label: 'rocket-stove-airflow:field-render' });
+    this.tracerDraw = draw(gpu, {
+      shader: tracerRenderWgsl,
+      label: 'rocket-stove-airflow:tracer-render',
+      instances: this.tracerCount,
+      vertices: 6,
+    });
   }
 
   uploadAirflowState(snapshot: CpuAirflowSnapshot): void {
     this.requireFields().upload(snapshot);
+  }
+
+  uploadTracerState(interleavedPositions: Float32Array): void {
+    this.requireFields().uploadTracers(interleavedPositions);
   }
 
   step(dt: number): void {
@@ -154,6 +201,59 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.runCoolingResidence(dt, workgroups);
     this.runSecondaryCombustion(dt, workgroups);
     this.exchangeOpenBoundaryScalars(dt, workgroups);
+    this.runTracers(dt, options.simulationTime ?? 0);
+  }
+
+  renderFrame(): void {
+    const gpu = this.requireGpu();
+    const fields = this.requireFields();
+    const target = this.renderSurface;
+    const fieldEffect = this.fieldEffect;
+    const tracerDraw = this.tracerDraw;
+    if (!target || !fieldEffect || !tracerDraw) return;
+
+    fieldEffect.set({
+      params: {
+        h: this.h,
+        sim_width: this.simWidth,
+        sim_height: this.simHeight,
+        ambient_temperature: 25,
+        nx: this.nx,
+        ny: this.ny,
+        _pad0: 0,
+        _pad1: 0,
+      },
+      solid: fields.solid,
+      fuel_mask: fields.fuelMask,
+      velocity: fields.velocity.read,
+      temperature: fields.temperature.read,
+      smoke: fields.smoke.read,
+      raw_straw: fields.rawStraw,
+      char_mass: fields.char,
+      ash: fields.ash,
+    });
+
+    tracerDraw.set({
+      params: {
+        sim_width: this.simWidth,
+        sim_height: this.simHeight,
+        h: this.h,
+        radius: 2.0,
+        nx: this.nx,
+        ny: this.ny,
+        tracer_count: this.tracerCount,
+        _pad0: 0,
+      },
+      tracers: fields.tracers,
+      temperature: fields.temperature.read,
+    });
+
+    frame(gpu, (f) => {
+      f.pass(target, (pass) => {
+        pass.draw(fieldEffect);
+        pass.draw(tracerDraw);
+      });
+    });
   }
 
   async readVelocity(): Promise<{ u: Float32Array; v: Float32Array }> {
@@ -166,6 +266,10 @@ export class GpuSimulationBackend implements SimulationBackend {
 
   async readFuelState(): Promise<GpuFuelState> {
     return this.requireFields().readFuelState();
+  }
+
+  async readTracerState(): Promise<Float32Array> {
+    return this.requireFields().readTracers();
   }
 
   async readPressure(): Promise<Float32Array> {
@@ -200,6 +304,9 @@ export class GpuSimulationBackend implements SimulationBackend {
 
   dispose(): void {
     if (!this.initialized) return;
+    this.renderSurface = null;
+    this.fieldEffect = null;
+    this.tracerDraw = null;
     this.fields?.dispose();
     this.gpu?.dispose();
     this.fields = null;
@@ -218,6 +325,7 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.charOxidationPass = null;
     this.coolingResidence = null;
     this.secondaryCombustion = null;
+    this.tracerUpdate = null;
     this.gpu = null;
     this.initialized = false;
   }
@@ -358,6 +466,27 @@ export class GpuSimulationBackend implements SimulationBackend {
       .dispatch(workgroups);
     fields.secondaryReaction.swap();
     this.reduceVec2Buffer(fields.secondaryReaction, this.cellCount);
+  }
+
+  private runTracers(dt: number, simulationTime: number): void {
+    const fields = this.requireFields();
+    this.requirePass(this.tracerUpdate, 'tracerUpdate')
+      .set({
+        params: {
+          dt,
+          h: this.h,
+          sim_width: this.simWidth,
+          sim_height: this.simHeight,
+          sim_time: simulationTime,
+          tracer_count: this.tracerCount,
+          nx: this.nx,
+          ny: this.ny,
+        },
+        solid: fields.solid,
+        velocity: fields.velocity.read,
+        tracers: fields.tracers,
+      })
+      .dispatch(Math.ceil(this.tracerCount / 64));
   }
 
   private runTransport(dt: number, includeOpenBoundaryExchange: boolean): void {
@@ -540,6 +669,11 @@ export class GpuSimulationBackend implements SimulationBackend {
       pair.swap();
       inputCount = outputCount;
     }
+  }
+
+  private requireGpu(): Gpu {
+    if (!this.gpu) throw new Error('GpuSimulationBackend.initialize() must run first');
+    return this.gpu;
   }
 
   private requireFields(): GpuFieldRegistry {
