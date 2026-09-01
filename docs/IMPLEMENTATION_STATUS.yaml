@@ -7,7 +7,9 @@ project:
 status:
   repository_creation: completed
   old_repository_modified: false
-  phase: phase_2_cpu_2d_reference
+  phase: phase_3_vgpu_airflow_core
+  live_browser_backend: cpu
+  gpu_backend_authority: parity_candidate
   ci: passing
 
 implemented:
@@ -59,20 +61,26 @@ implemented:
     - compact sealed oracle
 
   tests:
-    fuel_model:
-      - cold pyrolysis guard
-      - oxygen-limited char retention
-      - oxygen-rich char oxidation comparison
-      - oxygen-alone does not erase smoke
-      - secondary smoke oxidation condition test
-      - mineral and organic conservation
-    cpu_airflow:
-      - preset creates finite fuel
-      - ignited raw straw decreases
-      - compact sealed stove oxygen decreases
-      - smoke does not auto-decay
-      - open-boundary inflow/outflow approximately balance
-    total: 11
+    fuel_and_cpu_airflow:
+      total: 11
+      includes:
+        - cold pyrolysis guard
+        - oxygen-limited char retention
+        - oxygen-rich char oxidation comparison
+        - oxygen-alone does not erase smoke
+        - secondary smoke oxidation condition test
+        - mineral and organic conservation
+        - finite-fuel preset
+        - ignited raw straw decreases
+        - compact sealed stove oxygen decreases
+        - smoke does not auto-decay
+        - open-boundary inflow/outflow balance
+    gpu_parity:
+      runtime: vgpu/node + Dawn
+      suites:
+        - buoyancy CPU/GPU float parity
+        - local airflow chain parity
+        - global open-boundary flux reduction/correction parity
 
   frontend:
     - Vite application
@@ -82,29 +90,59 @@ implemented:
     - advanced airflow diagnostics
 
   vgpu:
-    - backend interface scaffold
-    - pyrolysis WGSL module scaffold
-    - char oxidation WGSL module scaffold
+    integration:
+      - Vite WGSL loader
+      - WGSL TypeScript module declarations
+      - strict TypeScript typecheck
+      - typed GPU field registry
+      - browser VGPU initialization backend
+    storage:
+      - temperature
+      - solid mask
+      - velocity ping-pong
+      - pressure ping-pong
+      - divergence
+      - boundary-flux reduction scratch ping-pong
+    airflow_compute_pipeline:
+      - buoyancy
+      - velocity advection
+      - divergence
+      - pressure Jacobi
+      - pressure projection
+      - per-cell boundary flux statistics
+      - GPU vec2 reduction
+      - global boundary flux correction
+    fuel_scaffolds:
+      - pyrolysis WGSL
+      - char oxidation WGSL
 
 validation:
   github_actions:
     cpu_physics_invariants: success
+    typescript_strict_typecheck: success
+    all_wgsl_validation: success
+    vgpu_dawn_gpu_parity: success
     vite_production_build: success
+  policy:
+    - CPU Physics v3 remains the oracle during migration
+    - GPU readback is used in tests/diagnostics, not the hot browser loop
+    - no browser backend switch until airflow/scalar integration has a stable state synchronization strategy
 
 next:
-  phase_3_vgpu_airflow:
-    - create typed GPU field registry
-    - initialize VGPU browser backend
-    - add CPU/GPU backend selector
-    - migrate buoyancy compute pass
-    - migrate velocity advection compute pass
-    - migrate divergence compute pass
-    - migrate pressure Jacobi compute pass
-    - migrate pressure projection compute pass
-    - establish CPU/GPU tolerance-based airflow parity tests
+  phase_3b_gpu_scalar_fields:
+    - add temperature/oxygen/smoke/volatileGas/exhaustGas/residence ping-pong storage
+    - migrate scalar advection
+    - migrate open-boundary scalar exchange
+    - add sealed-component scalar conservation strategy on GPU
+    - add CPU/GPU scalar parity tests
+
+  phase_3c_browser_backend_switch:
+    - design CPU/GPU state ownership boundary
+    - add auto/cpu/gpu selector
+    - preserve CPU fallback when WebGPU unavailable
+    - avoid per-frame GPU readback for rendering/tracers
 
   later:
-    - migrate scalar advection
     - migrate Physics v3 fuel transformation
     - migrate tracer particles
-    - migrate field rendering
+    - migrate GPU field rendering
