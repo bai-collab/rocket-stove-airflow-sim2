@@ -8,20 +8,24 @@ export type CpuAirflowSnapshot = {
 };
 
 /**
- * Device-local field ownership for the first VGPU airflow migration passes.
- * CPU state remains authoritative until parity tests are stable.
+ * Device-local field ownership for the VGPU airflow migration passes.
+ * CPU state remains authoritative until whole-pipeline parity is stable.
  */
 export class GpuFieldRegistry {
   readonly cellCount: number;
   readonly temperature: StorageBuffer;
   readonly solid: StorageBuffer;
   readonly velocity: ReturnType<typeof pingPongStorage>;
+  readonly pressure: ReturnType<typeof pingPongStorage>;
+  readonly divergence: StorageBuffer;
 
   constructor(gpu: Gpu, cellCount: number) {
     this.cellCount = cellCount;
     this.temperature = storage(gpu, cellCount * 4, 'read');
     this.solid = storage(gpu, cellCount * 4, 'read');
     this.velocity = pingPongStorage(gpu, cellCount * 8);
+    this.pressure = pingPongStorage(gpu, cellCount * 4);
+    this.divergence = storage(gpu, cellCount * 4, 'read-write');
   }
 
   upload(snapshot: CpuAirflowSnapshot): void {
@@ -43,6 +47,14 @@ export class GpuFieldRegistry {
     this.solid.write(solid32);
     this.velocity.read.write(velocity);
     this.velocity.write.write(velocity);
+    this.resetPressure();
+  }
+
+  resetPressure(): void {
+    const zero = new Float32Array(this.cellCount);
+    this.pressure.read.write(zero);
+    this.pressure.write.write(zero);
+    this.divergence.write(zero);
   }
 
   async readVelocity(): Promise<{ u: Float32Array; v: Float32Array }> {
@@ -56,6 +68,14 @@ export class GpuFieldRegistry {
     return { u, v };
   }
 
+  async readPressure(): Promise<Float32Array> {
+    return new Float32Array(await this.pressure.read.read());
+  }
+
+  async readDivergence(): Promise<Float32Array> {
+    return new Float32Array(await this.divergence.read());
+  }
+
   resetVelocity(): void {
     const zero = new Float32Array(this.cellCount * 2);
     this.velocity.read.write(zero);
@@ -67,6 +87,9 @@ export class GpuFieldRegistry {
     this.solid.destroy();
     this.velocity.read.destroy();
     this.velocity.write.destroy();
+    this.pressure.read.destroy();
+    this.pressure.write.destroy();
+    this.divergence.destroy();
   }
 
   private assertLength(value: ArrayLike<number>, name: string): void {
