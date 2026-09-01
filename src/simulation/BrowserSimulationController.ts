@@ -3,6 +3,8 @@ import {
   H,
   NX,
   NY,
+  SIM_HEIGHT,
+  SIM_WIDTH,
 } from './CpuRocketSimulation.mjs';
 import { GpuSimulationBackend } from '../gpu/GpuSimulationBackend';
 
@@ -20,18 +22,39 @@ export type BackendStatus = {
 
 type StatusListener = (status: BackendStatus) => void;
 
+type CpuCheckpoint = {
+  time: number;
+  ignitionRemaining: number;
+  pyrolyzedTotal: number;
+  charGeneratedTotal: number;
+  charBurnedTotal: number;
+  volatileGeneratedTotal: number;
+  volatileBurnedTotal: number;
+  smokeGeneratedTotal: number;
+  smokeOxidizedTotal: number;
+  exhaustTotal: number;
+  smokeOutTotal: number;
+  volatileOutTotal: number;
+  lastSecondaryRate: number;
+  lastPressureResidual: number;
+  lastInflow: number;
+  lastOutflow: number;
+};
+
+const GPU_CHECKPOINT_INTERVAL_TICKS = 6;
+
 /**
- * Phase 4 browser coordinator.
+ * Phase 5 browser coordinator.
  *
- * GPU mode owns Physics v3 fuel transformation, airflow, scalar transport,
- * cooling/residence, secondary combustion and open-boundary scalar exchange.
- * CPU remains the synchronized presentation/oracle mirror for diagnostics,
- * Canvas2D rendering and tracer particles until those are migrated later.
+ * GPU mode owns Physics v3, tracer particles and field presentation. CPU arrays
+ * are a low-frequency checkpoint/oracle mirror used by diagnostics, explicit
+ * CPU switching and deterministic fallback replay after a GPU failure.
  */
 export class BrowserSimulationController {
   readonly cpu: CpuRocketSimulation;
 
   private gpu: GpuSimulationBackend | null = null;
+  private renderCanvas: HTMLCanvasElement | null = null;
   private requested: BackendPreference = 'auto';
   private effective: EffectiveBackend = 'cpu';
   private detail = 'CPU reference backend';
@@ -39,9 +62,13 @@ export class BrowserSimulationController {
   private activeStep: Promise<void> | null = null;
   private listeners = new Set<StatusListener>();
   private gpuStateDirty = true;
+  private gpuTracersDirty = true;
+  private gpuTicksSinceCheckpoint = 0;
+  private checkpoint: CpuCheckpoint | null = null;
 
   constructor() {
     this.cpu = new CpuRocketSimulation();
+    this.captureCheckpoint();
   }
 
   get status(): BackendStatus {
@@ -49,7 +76,7 @@ export class BrowserSimulationController {
     return {
       requested: this.requested,
       effective: this.effective,
-      label: this.effective === 'gpu' ? 'GPU · VGPU Physics v3' : 'CPU · Physics v3 reference',
+      label: this.effective === 'gpu' ? 'GPU · Physics + Tracers + Render' : 'CPU · Physics v3 reference',
       detail: this.detail,
       gpuAvailable,
       fallback: this.fallback,
@@ -62,6 +89,11 @@ export class BrowserSimulationController {
     return () => this.listeners.delete(listener);
   }
 
+  attachGpuCanvas(canvas: HTMLCanvasElement): void {
+    this.renderCanvas = canvas;
+    if (this.gpu) this.gpu.attachRenderCanvas(canvas);
+  }
+
   async initialize(preference: BackendPreference = 'auto'): Promise<BackendStatus> {
     return this.setBackend(preference);
   }
@@ -72,6 +104,14 @@ export class BrowserSimulationController {
     this.fallback = false;
 
     if (preference === 'cpu') {
+      if (this.effective === 'gpu' && this.gpu) {
+        try {
+          await this.syncPresentationCheckpoint(true);
+        } catch (error) {
+          this.restoreCheckpointScalars();
+          this.detail = `GPU checkpoint readback failed while switching to CPU. ${this.describeError(error)}`;
+        }
+      }
       this.effective = 'cpu';
       this.detail = 'CPU reference selected explicitly.';
       this.emitStatus();
@@ -92,11 +132,15 @@ export class BrowserSimulationController {
     try {
       await this.ensureGpu();
       this.uploadCpuFullState();
+      this.uploadCpuTracerState();
       this.gpuStateDirty = false;
+      this.gpuTracersDirty = false;
+      this.gpuTicksSinceCheckpoint = 0;
+      this.captureCheckpoint();
       this.effective = 'gpu';
       this.detail = preference === 'gpu'
-        ? 'GPU Physics v3 selected. Fuel reactions and transport run on VGPU/WebGPU; CPU mirrors results for rendering and tracers.'
-        : 'Auto selected GPU Physics v3. CPU remains the synchronized reference/render mirror.';
+        ? 'GPU selected. Physics, tracers and field rendering stay on WebGPU; full CPU checkpoints update about 5 times/second.'
+        : 'Auto selected GPU. Physics, tracers and rendering stay device-local with low-frequency CPU checkpoints.';
     } catch (error) {
       this.disposeGpu();
       this.effective = 'cpu';
@@ -121,20 +165,55 @@ export class BrowserSimulationController {
     return this.activeStep;
   }
 
+  renderGpuFrame(): void {
+    if (this.effective !== 'gpu' || !this.gpu) return;
+    try {
+      if (this.gpuStateDirty) {
+        this.uploadCpuFullState();
+        this.gpuStateDirty = false;
+        this.gpuTicksSinceCheckpoint = 0;
+        this.captureCheckpoint();
+      }
+      if (this.gpuTracersDirty) {
+        this.uploadCpuTracerState();
+        this.gpuTracersDirty = false;
+      }
+      this.gpu.renderFrame();
+    } catch (error) {
+      this.detail = `GPU presentation error: ${this.describeError(error)}`;
+      this.emitStatus();
+    }
+  }
+
   loadPreset(id: string): boolean {
     const loaded = this.cpu.loadPreset(id);
-    if (loaded) this.gpuStateDirty = true;
+    if (loaded) {
+      this.gpuStateDirty = true;
+      this.gpuTracersDirty = true;
+      this.gpuTicksSinceCheckpoint = 0;
+      this.captureCheckpoint();
+    }
     return loaded;
   }
 
   clearScene(): void {
     this.cpu.clearScene();
     this.gpuStateDirty = true;
+    this.gpuTracersDirty = true;
+    this.gpuTicksSinceCheckpoint = 0;
+    this.captureCheckpoint();
   }
 
-  setToolAt(tool: string, x: number, y: number): void {
+  async setToolAt(tool: string, x: number, y: number): Promise<void> {
+    if (this.activeStep) await this.activeStep;
+    if (this.effective === 'gpu' && this.gpu && this.gpuTicksSinceCheckpoint > 0) {
+      await this.syncPresentationCheckpoint(true);
+    }
     this.cpu.setToolAt(tool, x, y);
     this.gpuStateDirty = true;
+    this.gpuTracersDirty = true;
+    this.gpuTicksSinceCheckpoint = 0;
+    this.captureCheckpoint();
   }
 
   ignite(): void {
@@ -152,6 +231,7 @@ export class BrowserSimulationController {
 
   private async stepCpu(dt: number): Promise<void> {
     this.cpu.step(dt);
+    this.captureCheckpoint();
   }
 
   private async stepGpuPhysics(dt: number): Promise<void> {
@@ -159,16 +239,20 @@ export class BrowserSimulationController {
     if (!gpu) {
       this.fallbackToCpu('GPU backend was not initialized; CPU fallback active.');
       this.cpu.step(dt);
+      this.captureCheckpoint();
       return;
     }
-
-    const previousTime = this.cpu.time;
-    const previousIgnitionRemaining = this.cpu.ignitionRemaining;
 
     try {
       if (this.gpuStateDirty) {
         this.uploadCpuFullState();
         this.gpuStateDirty = false;
+        this.gpuTicksSinceCheckpoint = 0;
+        this.captureCheckpoint();
+      }
+      if (this.gpuTracersDirty) {
+        this.uploadCpuTracerState();
+        this.gpuTracersDirty = false;
       }
 
       this.cpu.time += dt;
@@ -177,64 +261,89 @@ export class BrowserSimulationController {
         this.cpu.ignitionRemaining = Math.max(0, this.cpu.ignitionRemaining - dt);
       }
 
-      gpu.stepPhysics(dt, { ignitionActive });
+      gpu.stepPhysics(dt, {
+        ignitionActive,
+        simulationTime: this.cpu.time,
+      });
 
-      const [velocity, scalars, fuel, outflow, secondaryReacted] = await Promise.all([
-        gpu.readVelocity(),
-        gpu.readScalarState(),
-        gpu.readFuelState(),
+      const [outflow, secondaryReacted] = await Promise.all([
         gpu.readScalarOutflowTotal(),
         gpu.readSecondaryReactionTotal(),
       ]);
+      this.updateCpuSmallDiagnostics(outflow, secondaryReacted, dt);
+      this.gpuTicksSinceCheckpoint += 1;
 
-      this.cpu.u.set(velocity.u);
-      this.cpu.v.set(velocity.v);
-      this.cpu.temperature.set(scalars.temperature);
-      this.cpu.oxygen.set(scalars.oxygen);
-      this.cpu.smoke.set(scalars.smoke);
-      this.cpu.volatileGas.set(scalars.volatileGas);
-      this.cpu.exhaustGas.set(scalars.exhaustGas);
-      this.cpu.secondaryResidence.set(scalars.secondaryResidence);
-      this.cpu.rawStraw.set(fuel.rawStraw);
-      this.cpu.char.set(fuel.char);
-      this.cpu.mineralMatter.set(fuel.mineralMatter);
-      this.cpu.ash.set(fuel.ash);
-
-      this.updateCpuReactionDiagnostics(outflow, secondaryReacted, dt);
-      this.cpu.lastPressureResidual = this.estimateVelocityResidual();
-      this.cpu.measureBoundaryFlux();
-      this.cpu.updateTracers(dt);
+      if (this.gpuTicksSinceCheckpoint >= GPU_CHECKPOINT_INTERVAL_TICKS) {
+        await this.syncPresentationCheckpoint(true);
+      }
     } catch (error) {
-      // CPU arrays still represent the last completed tick because all GPU
-      // readbacks are applied only after Promise.all succeeds. Restore the two
-      // scalar clock values and execute the same tick once on CPU.
-      this.cpu.time = previousTime;
-      this.cpu.ignitionRemaining = previousIgnitionRemaining;
+      const replayTicks = this.gpuTicksSinceCheckpoint + 1;
+      this.restoreCheckpointScalars();
       this.disposeGpu();
       this.fallbackToCpu(
-        `GPU runtime failed; the current tick was recomputed once on CPU. ${this.describeError(error)}`
+        `GPU runtime failed; replayed ${replayTicks} tick(s) from the last CPU checkpoint. ${this.describeError(error)}`
       );
-      this.cpu.step(dt);
+      for (let i = 0; i < replayTicks; i += 1) {
+        this.cpu.step(dt);
+      }
+      this.captureCheckpoint();
     }
   }
 
-  private updateCpuReactionDiagnostics(
+  private updateCpuSmallDiagnostics(
     outflow: { smokeOut: number; volatileOut: number },
     secondaryReacted: number,
     dt: number,
   ): void {
-    const raw = this.cpu.sum(this.cpu.rawStraw);
-    const charMass = this.cpu.sum(this.cpu.char);
-    const pyrolyzed = Math.max(0, this.cpu.initialOrganic - raw);
-
-    this.cpu.pyrolyzedTotal = pyrolyzed;
-    this.cpu.charGeneratedTotal = pyrolyzed * 0.34;
-    this.cpu.volatileGeneratedTotal = pyrolyzed * 0.66;
-    this.cpu.charBurnedTotal = Math.max(0, this.cpu.charGeneratedTotal - charMass);
     this.cpu.smokeOutTotal += Math.max(0, outflow.smokeOut);
     this.cpu.volatileOutTotal += Math.max(0, outflow.volatileOut);
     this.cpu.smokeOxidizedTotal += Math.max(0, secondaryReacted);
     this.cpu.lastSecondaryRate = Math.max(0, secondaryReacted) / Math.max(dt, 1e-6);
+  }
+
+  private async syncPresentationCheckpoint(includeTracers: boolean): Promise<void> {
+    const gpu = this.gpu;
+    if (!gpu) return;
+    const reads = [
+      gpu.readVelocity(),
+      gpu.readScalarState(),
+      gpu.readFuelState(),
+    ] as const;
+    const [velocity, scalars, fuel] = await Promise.all(reads);
+
+    this.cpu.u.set(velocity.u);
+    this.cpu.v.set(velocity.v);
+    this.cpu.temperature.set(scalars.temperature);
+    this.cpu.oxygen.set(scalars.oxygen);
+    this.cpu.smoke.set(scalars.smoke);
+    this.cpu.volatileGas.set(scalars.volatileGas);
+    this.cpu.exhaustGas.set(scalars.exhaustGas);
+    this.cpu.secondaryResidence.set(scalars.secondaryResidence);
+    this.cpu.rawStraw.set(fuel.rawStraw);
+    this.cpu.char.set(fuel.char);
+    this.cpu.mineralMatter.set(fuel.mineralMatter);
+    this.cpu.ash.set(fuel.ash);
+
+    if (includeTracers) {
+      const tracerData = await gpu.readTracerState();
+      const count = Math.min(this.cpu.tracers.length, Math.floor(tracerData.length / 2));
+      for (let i = 0; i < count; i += 1) {
+        this.cpu.tracers[i].x = tracerData[i * 2] ?? this.cpu.tracers[i].x;
+        this.cpu.tracers[i].y = tracerData[i * 2 + 1] ?? this.cpu.tracers[i].y;
+      }
+    }
+
+    const raw = this.cpu.sum(this.cpu.rawStraw);
+    const charMass = this.cpu.sum(this.cpu.char);
+    const pyrolyzed = Math.max(0, this.cpu.initialOrganic - raw);
+    this.cpu.pyrolyzedTotal = pyrolyzed;
+    this.cpu.charGeneratedTotal = pyrolyzed * 0.34;
+    this.cpu.volatileGeneratedTotal = pyrolyzed * 0.66;
+    this.cpu.charBurnedTotal = Math.max(0, this.cpu.charGeneratedTotal - charMass);
+    this.cpu.lastPressureResidual = this.estimateVelocityResidual();
+    this.cpu.measureBoundaryFlux();
+    this.gpuTicksSinceCheckpoint = 0;
+    this.captureCheckpoint();
   }
 
   private uploadCpuFullState(): void {
@@ -258,10 +367,29 @@ export class BrowserSimulationController {
     });
   }
 
+  private uploadCpuTracerState(): void {
+    const gpu = this.gpu;
+    if (!gpu) throw new Error('GPU backend is not initialized');
+    const positions = new Float32Array(this.cpu.tracers.length * 2);
+    for (let i = 0; i < this.cpu.tracers.length; i += 1) {
+      positions[i * 2] = this.cpu.tracers[i].x;
+      positions[i * 2 + 1] = this.cpu.tracers[i].y;
+    }
+    gpu.uploadTracerState(positions);
+  }
+
   private async ensureGpu(): Promise<void> {
     if (this.gpu) return;
-    const gpu = new GpuSimulationBackend({ nx: NX, ny: NY, h: H });
+    const gpu = new GpuSimulationBackend({
+      nx: NX,
+      ny: NY,
+      h: H,
+      simWidth: SIM_WIDTH,
+      simHeight: SIM_HEIGHT,
+      tracerCount: this.cpu.tracers.length,
+    });
     await gpu.initialize();
+    if (this.renderCanvas) gpu.attachRenderCanvas(this.renderCanvas);
     this.gpu = gpu;
   }
 
@@ -269,6 +397,8 @@ export class BrowserSimulationController {
     this.gpu?.dispose();
     this.gpu = null;
     this.gpuStateDirty = true;
+    this.gpuTracersDirty = true;
+    this.gpuTicksSinceCheckpoint = 0;
   }
 
   private fallbackToCpu(detail: string): void {
@@ -276,6 +406,48 @@ export class BrowserSimulationController {
     this.fallback = true;
     this.detail = detail;
     this.emitStatus();
+  }
+
+  private captureCheckpoint(): void {
+    this.checkpoint = {
+      time: this.cpu.time,
+      ignitionRemaining: this.cpu.ignitionRemaining,
+      pyrolyzedTotal: this.cpu.pyrolyzedTotal,
+      charGeneratedTotal: this.cpu.charGeneratedTotal,
+      charBurnedTotal: this.cpu.charBurnedTotal,
+      volatileGeneratedTotal: this.cpu.volatileGeneratedTotal,
+      volatileBurnedTotal: this.cpu.volatileBurnedTotal,
+      smokeGeneratedTotal: this.cpu.smokeGeneratedTotal,
+      smokeOxidizedTotal: this.cpu.smokeOxidizedTotal,
+      exhaustTotal: this.cpu.exhaustTotal,
+      smokeOutTotal: this.cpu.smokeOutTotal,
+      volatileOutTotal: this.cpu.volatileOutTotal,
+      lastSecondaryRate: this.cpu.lastSecondaryRate,
+      lastPressureResidual: this.cpu.lastPressureResidual,
+      lastInflow: this.cpu.lastInflow,
+      lastOutflow: this.cpu.lastOutflow,
+    };
+  }
+
+  private restoreCheckpointScalars(): void {
+    const c = this.checkpoint;
+    if (!c) return;
+    this.cpu.time = c.time;
+    this.cpu.ignitionRemaining = c.ignitionRemaining;
+    this.cpu.pyrolyzedTotal = c.pyrolyzedTotal;
+    this.cpu.charGeneratedTotal = c.charGeneratedTotal;
+    this.cpu.charBurnedTotal = c.charBurnedTotal;
+    this.cpu.volatileGeneratedTotal = c.volatileGeneratedTotal;
+    this.cpu.volatileBurnedTotal = c.volatileBurnedTotal;
+    this.cpu.smokeGeneratedTotal = c.smokeGeneratedTotal;
+    this.cpu.smokeOxidizedTotal = c.smokeOxidizedTotal;
+    this.cpu.exhaustTotal = c.exhaustTotal;
+    this.cpu.smokeOutTotal = c.smokeOutTotal;
+    this.cpu.volatileOutTotal = c.volatileOutTotal;
+    this.cpu.lastSecondaryRate = c.lastSecondaryRate;
+    this.cpu.lastPressureResidual = c.lastPressureResidual;
+    this.cpu.lastInflow = c.lastInflow;
+    this.cpu.lastOutflow = c.lastOutflow;
   }
 
   private estimateVelocityResidual(): number {
