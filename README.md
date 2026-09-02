@@ -25,14 +25,27 @@ Physics v3 / VGPU 重構版。
 - `rawStraw / char / volatileGas / smoke / mineralMatter / ash` 狀態
 - carbonization metrics
 - Node built-in physics tests
-- VGPU backend 介面骨架
-- WGSL `pyrolysis` / `char oxidation` 模組骨架
+- VGPU backend、device-local Physics v3 與直接 WebGPU 呈現
+- WGSL `pyrolysis` / `volatile combustion` / `char oxidation` / `secondary combustion` 模組
+- GPU tracer 掃掠碰撞與 scalar outflow reduction
+- GPU 黑煙／揮發氣體／尾氣傳輸的 mass reduction 與守恆校正
+- CPU／GPU 燃料參數共用 `DEFAULT_FUEL_PARAMS`
 
 ## 執行測試
 
 ```bash
 npm test
+npm run typecheck
+npm run check:wgsl
+npm run test:gpu
+npm run build
 ```
+
+`npm run test:gpu` 需要可用的 Dawn/WebGPU adapter；命令內含 adapter smoke test，沒有 GPU 時會明確失敗，不會把整套 GPU 測試靜默當成成功。`npm run test:all` 會依序執行上述檢查。
+
+## 診斷記帳
+
+燃料反應以 `rawStraw`、`char`、`volatileGas`、`smoke` 與 reaction ledger 記帳。`exhaustGas` 是域內的可傳輸濃度，不會再和累積反應量重複相加；CPU 與 GPU 的氣體傳輸都會做 mass correction，邊界 fresh-air replacement 與 outflow 會先扣除氣體，再累計排出量。這些數值仍是教學模型的相對量，不是實際質量單位。
 
 ## 開發順序
 

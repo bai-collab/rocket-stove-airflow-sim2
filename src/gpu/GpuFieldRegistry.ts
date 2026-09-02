@@ -1,4 +1,5 @@
 import { pingPongStorage, storage, type Gpu, type StorageBuffer } from 'vgpu';
+import { DEFAULT_FUEL_PARAMS } from '../physics/fuel-model.mjs';
 
 export type CpuAirflowSnapshot = {
   temperature: Float32Array;
@@ -67,6 +68,7 @@ export class GpuFieldRegistry {
   readonly exhaustGas: PingPong;
   readonly secondaryResidence: PingPong;
   readonly scalarOutflow: PingPong;
+  readonly scalarMassStats: PingPong;
 
   readonly rawStraw: StorageBuffer;
   readonly char: StorageBuffer;
@@ -91,7 +93,8 @@ export class GpuFieldRegistry {
     this.volatileGas = pingPongStorage(gpu, cellCount * 4);
     this.exhaustGas = pingPongStorage(gpu, cellCount * 4);
     this.secondaryResidence = pingPongStorage(gpu, cellCount * 4);
-    this.scalarOutflow = pingPongStorage(gpu, cellCount * 8);
+    this.scalarOutflow = pingPongStorage(gpu, cellCount * 16);
+    this.scalarMassStats = pingPongStorage(gpu, cellCount * 16);
 
     this.rawStraw = storage(gpu, cellCount * 4, 'read-write');
     this.char = storage(gpu, cellCount * 4, 'read-write');
@@ -133,7 +136,7 @@ export class GpuFieldRegistry {
     this.velocity.read.write(velocity.buffer);
     this.velocity.write.write(velocity.buffer);
 
-    this.writeScalarPair(this.temperature, snapshot.temperature, 25);
+    this.writeScalarPair(this.temperature, snapshot.temperature, DEFAULT_FUEL_PARAMS.ambientTemperature);
     this.writeScalarPair(this.oxygen, snapshot.oxygen, 1);
     this.writeScalarPair(this.smoke, snapshot.smoke, 0);
     this.writeScalarPair(this.volatileGas, snapshot.volatileGas, 0);
@@ -147,6 +150,7 @@ export class GpuFieldRegistry {
     this.resetPressure();
     this.resetBoundaryFlux();
     this.resetScalarOutflow();
+    this.resetScalarMassStats();
     this.resetSecondaryReaction();
   }
 
@@ -174,9 +178,15 @@ export class GpuFieldRegistry {
   }
 
   resetScalarOutflow(): void {
-    const zero = new Float32Array(this.cellCount * 2);
+    const zero = new Float32Array(this.cellCount * 4);
     this.scalarOutflow.read.write(zero.buffer);
     this.scalarOutflow.write.write(zero.buffer);
+  }
+
+  resetScalarMassStats(): void {
+    const zero = new Float32Array(this.cellCount * 4);
+    this.scalarMassStats.read.write(zero.buffer);
+    this.scalarMassStats.write.write(zero.buffer);
   }
 
   resetSecondaryReaction(): void {
@@ -247,9 +257,13 @@ export class GpuFieldRegistry {
     return { netOutward: values[0] ?? 0, faceCount: values[1] ?? 0 };
   }
 
-  async readScalarOutflowTotal(): Promise<{ smokeOut: number; volatileOut: number }> {
+  async readScalarOutflowTotal(): Promise<{ smokeOut: number; volatileOut: number; exhaustOut: number }> {
     const values = new Float32Array(await this.scalarOutflow.read.read());
-    return { smokeOut: values[0] ?? 0, volatileOut: values[1] ?? 0 };
+    return {
+      smokeOut: values[0] ?? 0,
+      volatileOut: values[1] ?? 0,
+      exhaustOut: values[2] ?? 0,
+    };
   }
 
   async readSecondaryReactionTotal(): Promise<number> {
@@ -277,6 +291,7 @@ export class GpuFieldRegistry {
     this.destroyPair(this.exhaustGas);
     this.destroyPair(this.secondaryResidence);
     this.destroyPair(this.scalarOutflow);
+    this.destroyPair(this.scalarMassStats);
     destroyStorage(this.rawStraw);
     destroyStorage(this.char);
     destroyStorage(this.mineralMatter);

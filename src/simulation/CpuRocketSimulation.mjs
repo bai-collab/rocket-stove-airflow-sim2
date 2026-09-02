@@ -1,4 +1,10 @@
 import { BUILD_CELL, STOVE_PRESETS } from './presets.mjs';
+import {
+  DEFAULT_FUEL_PARAMS,
+  createFuelState,
+  stepPrimaryFuelModel,
+  stepSecondarySmokeOxidation,
+} from '../physics/fuel-model.mjs';
 
 export const SIM_WIDTH = 900;
 export const SIM_HEIGHT = 560;
@@ -7,38 +13,17 @@ export const NX = Math.ceil(SIM_WIDTH / H);
 export const NY = Math.ceil(SIM_HEIGHT / H);
 export const N = NX * NY;
 export const DT = 1 / 30;
-export const AMBIENT_T = 25;
+export const AMBIENT_T = DEFAULT_FUEL_PARAMS.ambientTemperature;
 export const AMBIENT_O2 = 1;
-export const MAX_T = 700;
+export const MAX_T = DEFAULT_FUEL_PARAMS.maxTemperature;
 export const MAX_SPEED = 180;
 
 const PRESSURE_ITERS = 36;
 const TRACE_STEP = Math.max(2, H * 0.35);
 const DEFAULT_TRACERS = 320;
 
-const FUEL = Object.freeze({
-  pyrolysisStartTemperature: 140,
-  pyrolysisFullTemperature: 420,
-  pyrolysisRate: 0.22,
-  charYield: 0.34,
-  volatileYield: 0.66,
-  volatileBurnStartTemperature: 180,
-  volatileBurnFullTemperature: 520,
-  volatileBurnRate: 2.2,
-  volatileOxygenUse: 0.34,
-  volatileHeatGain: 185,
-  cleanSmokeYield: 0.02,
-  dirtySmokeYield: 0.58,
-  charOxidationStartTemperature: 260,
-  charOxidationFullTemperature: 620,
-  charOxidationRate: 0.5,
-  charOxygenUse: 0.44,
-  charHeatGain: 135,
-  secondarySmokeOxidationRate: 0.55,
-  secondarySmokeOxygenUse: 0.14,
-  secondaryHeatGain: 85,
-  ashExposurePerCharOxidized: 0.18,
-});
+const FUEL = DEFAULT_FUEL_PARAMS;
+const GRID_EPSILON = 1e-5;
 
 const clamp = (x, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, x));
 const smoothstep = (x) => {
@@ -46,8 +31,8 @@ const smoothstep = (x) => {
   return t * t * (3 - 2 * t);
 };
 const idx = (x, y) => y * NX + x;
-const gridX = (px) => clamp(Math.floor(px / H), 0, NX - 1);
-const gridY = (py) => clamp(Math.floor(py / H), 0, NY - 1);
+const gridX = (px) => clamp(Math.floor(px / H + GRID_EPSILON), 0, NX - 1);
+const gridY = (py) => clamp(Math.floor(py / H + GRID_EPSILON), 0, NY - 1);
 const inCanvas = (x, y) => x >= 0 && y >= 0 && x < SIM_WIDTH && y < SIM_HEIGHT;
 const snap = (v) => Math.floor(v / BUILD_CELL) * BUILD_CELL;
 
@@ -86,6 +71,9 @@ export class CpuRocketSimulation {
     this.ash = new Float32Array(N);
     this.solid = new Uint8Array(N);
     this.fuelMask = new Uint8Array(N);
+    this.fuelInitialOrganic = new Float32Array(N);
+    this.fuelInitialMineral = new Float32Array(N);
+    this.fuelWork = createFuelState();
 
     this.walls = [];
     this.fuels = [];
@@ -106,6 +94,7 @@ export class CpuRocketSimulation {
     this.exhaustTotal = 0;
     this.smokeOutTotal = 0;
     this.volatileOutTotal = 0;
+    this.exhaustOutTotal = 0;
     this.lastSecondaryRate = 0;
     this.lastPressureResidual = 0;
     this.lastInflow = 0;
@@ -126,6 +115,7 @@ export class CpuRocketSimulation {
     this.secondaryResidence.fill(0); this.secondaryResidencePrev.fill(0);
     this.rawStraw.fill(0); this.char.fill(0); this.mineralMatter.fill(0); this.ash.fill(0);
     this.solid.fill(0); this.fuelMask.fill(0);
+    this.fuelInitialOrganic.fill(0); this.fuelInitialMineral.fill(0);
     this.time = 0;
     this.running = false;
     this.ignited = false;
@@ -142,6 +132,7 @@ export class CpuRocketSimulation {
     this.exhaustTotal = 0;
     this.smokeOutTotal = 0;
     this.volatileOutTotal = 0;
+    this.exhaustOutTotal = 0;
     this.lastSecondaryRate = 0;
     this.lastPressureResidual = 0;
     this.lastInflow = 0;
@@ -201,6 +192,9 @@ export class CpuRocketSimulation {
     const previousMineral = resetFuel ? null : this.mineralMatter.slice();
     const previousAsh = resetFuel ? null : this.ash.slice();
     const previousFuelMask = resetFuel ? null : this.fuelMask.slice();
+    const previousFuelInitialOrganic = resetFuel ? null : this.fuelInitialOrganic.slice();
+    const previousFuelInitialMineral = resetFuel ? null : this.fuelInitialMineral.slice();
+    const previousSolid = resetFuel ? null : this.solid.slice();
 
     this.solid.fill(0);
     this.fuelMask.fill(0);
@@ -214,20 +208,33 @@ export class CpuRocketSimulation {
         for (let gx = x0; gx < x1; gx += 1) {
           const i = idx(gx, gy);
           this.solid[i] = 1;
-          this.u[i] = 0;
-          this.v[i] = 0;
-          this.temperature[i] = AMBIENT_T;
-          this.oxygen[i] = 0;
-          this.smoke[i] = 0;
-          this.volatileGas[i] = 0;
         }
       }
+    }
+
+    const resetCell = (i, solid) => {
+      this.u[i] = 0; this.v[i] = 0; this.uPrev[i] = 0; this.vPrev[i] = 0;
+      this.pressure[i] = 0; this.pressureNext[i] = 0; this.divergence[i] = 0;
+      this.temperature[i] = AMBIENT_T;
+      this.temperaturePrev[i] = AMBIENT_T;
+      this.oxygen[i] = solid ? 0 : AMBIENT_O2;
+      this.oxygenPrev[i] = solid ? 0 : AMBIENT_O2;
+      this.smoke[i] = 0; this.smokePrev[i] = 0;
+      this.volatileGas[i] = 0; this.volatilePrev[i] = 0;
+      this.exhaustGas[i] = 0; this.exhaustPrev[i] = 0;
+      this.secondaryResidence[i] = 0; this.secondaryResidencePrev[i] = 0;
+    };
+
+    for (let i = 0; i < N; i += 1) {
+      if (this.solid[i] || previousSolid?.[i]) resetCell(i, this.solid[i] === 1);
     }
 
     this.rawStraw.fill(0);
     this.char.fill(0);
     this.mineralMatter.fill(0);
     this.ash.fill(0);
+    this.fuelInitialOrganic.fill(0);
+    this.fuelInitialMineral.fill(0);
 
     for (const fuel of this.fuels) {
       const x0 = Math.floor(fuel.x / H);
@@ -248,19 +255,19 @@ export class CpuRocketSimulation {
           this.char[i] = previousChar[i];
           this.mineralMatter[i] = previousMineral[i];
           this.ash[i] = previousAsh[i];
+          this.fuelInitialOrganic[i] = previousFuelInitialOrganic[i];
+          this.fuelInitialMineral[i] = previousFuelInitialMineral[i];
         } else {
           this.rawStraw[i] = organicPerCell;
           this.mineralMatter[i] = mineralPerCell;
-          this.initialOrganic += organicPerCell;
-          this.initialMineral += mineralPerCell;
+          this.fuelInitialOrganic[i] = organicPerCell;
+          this.fuelInitialMineral[i] = mineralPerCell;
         }
       }
     }
 
-    if (resetFuel) {
-      this.initialOrganic = this.sum(this.rawStraw);
-      this.initialMineral = this.sum(this.mineralMatter);
-    }
+    this.initialOrganic = this.sum(this.fuelInitialOrganic);
+    this.initialMineral = this.sum(this.fuelInitialMineral);
 
     this.relocateTracersOutOfSolids();
   }
@@ -286,9 +293,9 @@ export class CpuRocketSimulation {
 
     this.advectField(this.temperature, this.temperaturePrev, this.u, this.v, dt, AMBIENT_T, true);
     this.advectField(this.oxygen, this.oxygenPrev, this.u, this.v, dt, AMBIENT_O2, true);
-    this.advectField(this.smoke, this.smokePrev, this.u, this.v, dt, 0, true);
-    this.advectField(this.volatileGas, this.volatilePrev, this.u, this.v, dt, 0, true);
-    this.advectField(this.exhaustGas, this.exhaustPrev, this.u, this.v, dt, 0, true);
+    this.advectField(this.smoke, this.smokePrev, this.u, this.v, dt, 0, true, true);
+    this.advectField(this.volatileGas, this.volatilePrev, this.u, this.v, dt, 0, true, true);
+    this.advectField(this.exhaustGas, this.exhaustPrev, this.u, this.v, dt, 0, true, true);
     this.advectField(this.secondaryResidence, this.secondaryResidencePrev, this.u, this.v, dt, 0, true);
 
     this.coolAndMix(dt);
@@ -299,95 +306,58 @@ export class CpuRocketSimulation {
   }
 
   applyFuelTransformation(dt) {
-    if (this.ignitionRemaining > 0) {
+    const ignitionActive = this.ignitionRemaining > 0;
+    if (ignitionActive) {
       this.ignitionRemaining = Math.max(0, this.ignitionRemaining - dt);
-      for (let i = 0; i < N; i += 1) {
-        if (!this.fuelMask[i] || this.solid[i]) continue;
-        const activeFuel = this.rawStraw[i] + this.char[i];
-        if (activeFuel <= 1e-8) continue;
-        this.temperature[i] = clamp(this.temperature[i] + 230 * dt, AMBIENT_T, MAX_T);
-      }
     }
 
+    const state = this.fuelWork;
     for (let y = 0; y < NY; y += 1) {
       for (let x = 0; x < NX; x += 1) {
         const i = idx(x, y);
         if (!this.fuelMask[i] || this.solid[i]) continue;
 
-        const pyroTemp = smoothstep(
-          (this.temperature[i] - FUEL.pyrolysisStartTemperature) /
-          (FUEL.pyrolysisFullTemperature - FUEL.pyrolysisStartTemperature)
+        state.rawStraw = this.rawStraw[i];
+        state.char = this.char[i];
+        state.mineralMatter = this.mineralMatter[i];
+        state.ash = this.ash[i];
+        state.volatileGas = this.volatileGas[i];
+        state.smoke = this.smoke[i];
+        state.exhaustGas = this.exhaustGas[i];
+        const previousExhaust = state.exhaustGas;
+        state.oxygen = this.oxygen[i];
+        state.temperature = this.temperature[i];
+        state.pyrolyzedTotal = 0;
+        state.charGeneratedTotal = 0;
+        state.charBurnedTotal = 0;
+        state.volatileGeneratedTotal = 0;
+        state.volatileBurnedTotal = 0;
+        state.smokeGeneratedTotal = 0;
+        state.smokeOxidizedTotal = 0;
+
+        stepPrimaryFuelModel(
+          state,
+          dt,
+          { ignitionActive, mixing: this.localMixing(x, y, i) },
+          FUEL,
         );
-        if (pyroTemp > 0 && this.rawStraw[i] > 0) {
-          const converted = Math.min(
-            this.rawStraw[i],
-            this.rawStraw[i] * FUEL.pyrolysisRate * pyroTemp * dt
-          );
-          const charMade = converted * FUEL.charYield;
-          const volatileMade = converted * FUEL.volatileYield;
-          this.rawStraw[i] -= converted;
-          this.char[i] += charMade;
-          this.volatileGas[i] += volatileMade;
-          this.pyrolyzedTotal += converted;
-          this.charGeneratedTotal += charMade;
-          this.volatileGeneratedTotal += volatileMade;
-        }
 
-        if (this.volatileGas[i] > 0) {
-          const burnTemp = smoothstep(
-            (this.temperature[i] - FUEL.volatileBurnStartTemperature) /
-            (FUEL.volatileBurnFullTemperature - FUEL.volatileBurnStartTemperature)
-          );
-          const o2Factor = clamp((this.oxygen[i] - 0.04) / 0.72);
-          const mixing = this.localMixing(x, y, i);
-          const completeness = clamp(burnTemp * o2Factor * (0.25 + 0.75 * mixing));
-          const burnPotential = this.volatileGas[i] * FUEL.volatileBurnRate * completeness * dt;
-          const maxByO2 = this.oxygen[i] / Math.max(1e-6, FUEL.volatileOxygenUse);
-          const burned = Math.min(this.volatileGas[i], burnPotential, maxByO2);
-          if (burned > 0) {
-            this.volatileGas[i] -= burned;
-            this.oxygen[i] = clamp(this.oxygen[i] - burned * FUEL.volatileOxygenUse);
-            this.exhaustGas[i] += burned;
-            this.exhaustTotal += burned;
-            this.temperature[i] = clamp(this.temperature[i] + burned * FUEL.volatileHeatGain, AMBIENT_T, MAX_T);
-            this.volatileBurnedTotal += burned;
-          }
-
-          const hotEnoughToSmoke = smoothstep((this.temperature[i] - 110) / 180);
-          const poorCombustion = 1 - completeness;
-          const smokeYield = FUEL.cleanSmokeYield + FUEL.dirtySmokeYield * Math.pow(poorCombustion, 1.35);
-          const smokeSource = Math.min(
-            this.volatileGas[i],
-            this.volatileGas[i] * smokeYield * hotEnoughToSmoke * dt
-          );
-          if (smokeSource > 0) {
-            this.volatileGas[i] -= smokeSource;
-            this.smoke[i] += smokeSource;
-            this.smokeGeneratedTotal += smokeSource;
-          }
-        }
-
-        if (this.char[i] > 0) {
-          const charTemp = smoothstep(
-            (this.temperature[i] - FUEL.charOxidationStartTemperature) /
-            (FUEL.charOxidationFullTemperature - FUEL.charOxidationStartTemperature)
-          );
-          const o2Factor = clamp((this.oxygen[i] - 0.06) / 0.7);
-          const potential = this.char[i] * FUEL.charOxidationRate * charTemp * o2Factor * dt;
-          const maxByO2 = this.oxygen[i] / Math.max(1e-6, FUEL.charOxygenUse);
-          const oxidized = Math.min(this.char[i], potential, maxByO2);
-          if (oxidized > 0) {
-            this.char[i] -= oxidized;
-            this.oxygen[i] = clamp(this.oxygen[i] - oxidized * FUEL.charOxygenUse);
-            this.exhaustGas[i] += oxidized;
-            this.exhaustTotal += oxidized;
-            this.temperature[i] = clamp(this.temperature[i] + oxidized * FUEL.charHeatGain, AMBIENT_T, MAX_T);
-            this.charBurnedTotal += oxidized;
-            const exposed = Math.min(this.mineralMatter[i], oxidized * FUEL.ashExposurePerCharOxidized);
-            this.mineralMatter[i] -= exposed;
-            this.ash[i] += exposed;
-          }
-        }
+        this.rawStraw[i] = state.rawStraw;
+        this.char[i] = state.char;
+        this.mineralMatter[i] = state.mineralMatter;
+        this.ash[i] = state.ash;
+        this.volatileGas[i] = state.volatileGas;
+        this.smoke[i] = state.smoke;
+        this.exhaustGas[i] = state.exhaustGas;
+        this.oxygen[i] = state.oxygen;
+        this.temperature[i] = state.temperature;
+        this.pyrolyzedTotal += state.pyrolyzedTotal;
+        this.charGeneratedTotal += state.charGeneratedTotal;
+        this.charBurnedTotal += state.charBurnedTotal;
+        this.volatileGeneratedTotal += state.volatileGeneratedTotal;
+        this.volatileBurnedTotal += state.volatileBurnedTotal;
+        this.smokeGeneratedTotal += state.smokeGeneratedTotal;
+        this.exhaustTotal += state.exhaustGas - previousExhaust;
       }
     }
   }
@@ -401,7 +371,7 @@ export class CpuRocketSimulation {
     }
   }
 
-  advectField(dst, src, velocityU, velocityV, dt, fallback, wallSafe) {
+  advectField(dst, src, velocityU, velocityV, dt, fallback, wallSafe, conserve = false) {
     for (let y = 0; y < NY; y += 1) {
       for (let x = 0; x < NX; x += 1) {
         const i = idx(x, y);
@@ -426,6 +396,26 @@ export class CpuRocketSimulation {
         }
         dst[i] = this.sampleField(src, bx, by, src[i]);
       }
+    }
+
+    if (!conserve) return;
+    let sourceTotal = 0;
+    let destinationTotal = 0;
+    for (let i = 0; i < N; i += 1) {
+      if (this.solid[i]) continue;
+      sourceTotal += Math.max(0, src[i]);
+      destinationTotal += Math.max(0, dst[i]);
+    }
+    if (sourceTotal <= 1e-8) {
+      for (let i = 0; i < N; i += 1) {
+        if (!this.solid[i]) dst[i] = 0;
+      }
+      return;
+    }
+    if (destinationTotal <= 1e-8) return;
+    const correction = sourceTotal / destinationTotal;
+    for (let i = 0; i < N; i += 1) {
+      if (!this.solid[i]) dst[i] = Math.max(0, dst[i] * correction);
     }
   }
 
@@ -647,27 +637,40 @@ export class CpuRocketSimulation {
 
   applySecondaryCombustion(dt) {
     let reacted = 0;
+    const state = this.fuelWork;
     for (let y = 0; y < NY; y += 1) {
       for (let x = 0; x < NX; x += 1) {
         const i = idx(x, y);
         if (this.solid[i] || this.smoke[i] <= 0) continue;
-        const tempFactor = smoothstep((this.temperature[i] - 260) / 300);
-        const oxygenFactor = clamp((this.oxygen[i] - 0.08) / 0.65);
-        const mixing = this.localMixing(x, y, i);
-        const residence = clamp(this.secondaryResidence[i] / 0.75);
-        const secondary = tempFactor * oxygenFactor * mixing * residence;
-        if (secondary <= 0) continue;
-        const potential = this.smoke[i] * FUEL.secondarySmokeOxidationRate * secondary * dt;
-        const maxByO2 = this.oxygen[i] / Math.max(1e-6, FUEL.secondarySmokeOxygenUse);
-        const oxidized = Math.min(this.smoke[i], potential, maxByO2);
-        if (oxidized <= 0) continue;
-        this.smoke[i] -= oxidized;
-        this.oxygen[i] = clamp(this.oxygen[i] - oxidized * FUEL.secondarySmokeOxygenUse);
-        this.exhaustGas[i] += oxidized;
-        this.exhaustTotal += oxidized;
-        this.temperature[i] = clamp(this.temperature[i] + oxidized * FUEL.secondaryHeatGain, AMBIENT_T, MAX_T);
-        this.smokeOxidizedTotal += oxidized;
-        reacted += oxidized;
+
+        state.rawStraw = 0;
+        state.char = 0;
+        state.mineralMatter = 0;
+        state.ash = 0;
+        state.volatileGas = 0;
+        state.smoke = this.smoke[i];
+        state.exhaustGas = this.exhaustGas[i];
+        const previousExhaust = state.exhaustGas;
+        state.oxygen = this.oxygen[i];
+        state.temperature = this.temperature[i];
+        state.smokeOxidizedTotal = 0;
+
+        stepSecondarySmokeOxidation(
+          state,
+          dt,
+          {
+            mixing: this.localMixing(x, y, i),
+            residenceTime: this.secondaryResidence[i],
+          },
+          FUEL,
+        );
+
+        this.smoke[i] = state.smoke;
+        this.exhaustGas[i] = state.exhaustGas;
+        this.oxygen[i] = state.oxygen;
+        this.temperature[i] = state.temperature;
+        this.exhaustTotal += state.exhaustGas - previousExhaust;
+        reacted += state.smokeOxidizedTotal;
       }
     }
     this.lastSecondaryRate = reacted / Math.max(dt, 1e-6);
@@ -686,18 +689,25 @@ export class CpuRocketSimulation {
   }
 
   applyOpenBoundaryExchange(dt) {
+    const removeGas = (field, i, amount) => {
+      const removed = Math.max(0, field[i] * amount);
+      field[i] = Math.max(0, field[i] - removed);
+      return removed;
+    };
     const freshen = (i, rate) => {
       const k = clamp(rate * dt, 0, 1);
       this.temperature[i] += (AMBIENT_T - this.temperature[i]) * k;
       this.oxygen[i] += (AMBIENT_O2 - this.oxygen[i]) * k;
-      this.smoke[i] *= 1 - k;
-      this.volatileGas[i] *= 1 - k;
-      this.exhaustGas[i] *= 1 - k;
+      this.smokeOutTotal += removeGas(this.smoke, i, k);
+      this.volatileOutTotal += removeGas(this.volatileGas, i, k);
+      this.exhaustOutTotal += removeGas(this.exhaustGas, i, k);
     };
     const recordOut = (i, outward) => {
       if (outward <= 0 || this.solid[i]) return;
-      this.smokeOutTotal += this.smoke[i] * outward * dt / H;
-      this.volatileOutTotal += this.volatileGas[i] * outward * dt / H;
+      const k = clamp(outward * dt / H, 0, 1);
+      this.smokeOutTotal += removeGas(this.smoke, i, k);
+      this.volatileOutTotal += removeGas(this.volatileGas, i, k);
+      this.exhaustOutTotal += removeGas(this.exhaustGas, i, k);
     };
 
     for (let x = 0; x < NX; x += 1) {
@@ -773,16 +783,26 @@ export class CpuRocketSimulation {
         this.respawnTracerAtInflow(p);
         continue;
       }
-      if (!this.isSolidPoint(nx, ny)) {
+      if (!this.segmentHitsSolid(p.x, p.y, nx, ny)) {
         p.x = nx;
         p.y = ny;
         continue;
       }
       const tryX = { x: nx, y: p.y };
       const tryY = { x: p.x, y: ny };
-      if (!this.isSolidPoint(tryX.x, tryX.y)) p.x = tryX.x;
-      else if (!this.isSolidPoint(tryY.x, tryY.y)) p.y = tryY.y;
+      if (!this.segmentHitsSolid(p.x, p.y, tryX.x, tryX.y)) p.x = tryX.x;
+      else if (!this.segmentHitsSolid(p.x, p.y, tryY.x, tryY.y)) p.y = tryY.y;
     }
+  }
+
+  segmentHitsSolid(x0, y0, x1, y1) {
+    const distance = Math.hypot(x1 - x0, y1 - y0);
+    const steps = Math.max(1, Math.ceil(distance / TRACE_STEP));
+    for (let step = 1; step <= steps; step += 1) {
+      const t = step / steps;
+      if (this.isSolidPoint(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)) return true;
+    }
+    return false;
   }
 
   respawnTracerAtInflow(p) {
@@ -858,7 +878,10 @@ export class CpuRocketSimulation {
     const charRetention = this.charGeneratedTotal > 1e-9
       ? clamp(char / this.charGeneratedTotal)
       : 0;
-    const organicAccounted = raw + char + volatile + smoke + exhaustInDomain + this.smokeOutTotal + this.volatileOutTotal;
+    // `exhaustTotal` is the reaction ledger. `exhaustGas` is only an advected
+    // in-domain concentration and must not be added again, or convergent
+    // advection would double-count the same reacted material.
+    const organicAccounted = raw + char + volatile + smoke + this.exhaustTotal + this.smokeOutTotal + this.volatileOutTotal;
     const mineralAccounted = mineral + ash;
 
     return {
@@ -875,6 +898,7 @@ export class CpuRocketSimulation {
       averageTemperature: this.average(this.temperature),
       smokeOut: this.smokeOutTotal,
       volatileOut: this.volatileOutTotal,
+      exhaustOut: this.exhaustOutTotal,
       secondaryRate: this.lastSecondaryRate,
       pressureResidual: this.lastPressureResidual,
       inflow: this.lastInflow,

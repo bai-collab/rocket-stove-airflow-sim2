@@ -5,6 +5,7 @@ struct CharOxidationParams {
   heat_gain: f32,
   ash_exposure_per_char: f32,
   max_temperature: f32,
+  ambient_temperature: f32,
   cell_count: u32,
   _pad0: u32,
 };
@@ -47,7 +48,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     char_value -= oxidized;
     o2 = clamp(o2 - oxidized * params.oxygen_use, 0.0, 1.0);
     exhaust += oxidized;
-    t = clamp(t + oxidized * params.heat_gain, 25.0, params.max_temperature);
+    t = clamp(t + oxidized * params.heat_gain, params.ambient_temperature, params.max_temperature);
     let exposed = min(mineral, oxidized * params.ash_exposure_per_char);
     mineral -= exposed;
     ash_value += exposed;

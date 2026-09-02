@@ -32,7 +32,7 @@ function close(actual, expected, epsilon = 2e-4) {
   }
 }
 
-test('VGPU tracer integration moves in fluid and does not cross a solid endpoint', async (t) => {
+test('VGPU tracer integration uses swept solid collision', async (t) => {
   const gpu = await makeGpu(t);
   if (!gpu) return;
 
@@ -52,6 +52,9 @@ test('VGPU tracer integration moves in fluid and does not cross a solid endpoint
     velocityData[i * 2] = solidData[i] ? 0 : 4;
     velocityData[i * 2 + 1] = 0;
   }
+  // The middle tracer crosses the solid cell during this tick but ends in a
+  // fluid cell. This catches endpoint-only collision implementations.
+  velocityData[(1 * nx + 1) * 2] = 80;
   const tracerData = new Float32Array([
     6, 6,
     23, 18,
@@ -85,11 +88,11 @@ test('VGPU tracer integration moves in fluid and does not cross a solid endpoint
     });
     pass.dispatch(1);
     const actual = new Float32Array(await tracers.read());
-    close(actual, new Float32Array([
-      7, 6,
-      23, 18,
-      11, 30,
-    ]));
+  close(actual, new Float32Array([
+    7, 6,
+    23, 18,
+    11, 30,
+  ]));
   } finally {
     solid.destroy();
     velocity.destroy();
@@ -191,14 +194,23 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
     let brownish = 0;
     let warm = 0;
     let dark = 0;
+    let smokeCellDark = 0;
     let changed = 0;
     for (let i = 0; i < combined.length; i += 4) {
+      const pixel = i / 4;
+      const pixelX = pixel % width;
+      const pixelY = Math.floor(pixel / width);
       const r = combined[i];
       const g = combined[i + 1];
       const b = combined[i + 2];
       if (r > 110 && r < 180 && g > 65 && g < 130 && b < 100) brownish += 1;
       if (r > g * 1.25 && r > b * 1.4 && r > 130) warm += 1;
-      if (r < 90 && g < 90 && b < 100) dark += 1;
+      if (r < 150 && g < 150 && b < 160) dark += 1;
+      // Cell 6 is intentionally smoke-only: isolate it from the brown wall
+      // and fuel colors so the assertion checks the smoke mapping itself.
+      if (pixelX >= 96 && pixelX < 144 && pixelY >= 48 && pixelY < 96 && r < 180 && g < 180 && b < 180) {
+        smokeCellDark += 1;
+      }
       if (
         Math.abs(r - base[i]) +
         Math.abs(g - base[i + 1]) +
@@ -209,6 +221,7 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
     assert.ok(brownish > 300, `expected wall/fuel brown pixels, got ${brownish}`);
     assert.ok(warm > 150, `expected hot tracer/temperature pixels, got ${warm}`);
     assert.ok(dark > 150, `expected smoke/char dark pixels, got ${dark}`);
+    assert.ok(smokeCellDark > 1500, `expected smoke pixels in smoke cell, got ${smokeCellDark}`);
     assert.ok(changed > 20, `expected tracer draw to change pixels, got ${changed}`);
   } finally {
     solid.destroy();
@@ -220,7 +233,8 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
     charMass.destroy();
     ash.destroy();
     tracers.destroy();
-    screen.dispose();
+    // Offscreen targets are released with the owning VGPU instance. The
+    // generic Target interface intentionally has no dispose() method.
     gpu.dispose();
   }
 });

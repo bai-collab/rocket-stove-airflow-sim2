@@ -19,8 +19,11 @@ fn in_canvas(p: vec2f) -> bool {
 }
 
 fn grid_index_from_point(p: vec2f) -> u32 {
-  let gx = min(params.nx - 1u, u32(floor(p.x / params.h)));
-  let gy = min(params.ny - 1u, u32(floor(p.y / params.h)));
+  // Dawn/WebGPU may round a point that should be exactly on a cell edge to
+  // the fluid side. Keep collision classification stable at solid boundaries.
+  let epsilon = max(params.h * 1e-4, 1e-4);
+  let gx = min(params.nx - 1u, u32(floor((p.x + epsilon) / params.h)));
+  let gy = min(params.ny - 1u, u32(floor((p.y + epsilon) / params.h)));
   return gy * params.nx + gx;
 }
 
@@ -29,6 +32,27 @@ fn is_solid_point(p: vec2f) -> bool {
     return false;
   }
   return solid[grid_index_from_point(p)] != 0u;
+}
+
+// Swept collision prevents a fast tracer from tunnelling through a thin wall.
+fn segment_hits_solid(origin: vec2f, destination: vec2f) -> bool {
+  let delta = destination - origin;
+  let distance = length(delta);
+  let step_length = max(params.h * 0.35, 0.0001);
+  let steps = max(1u, u32(ceil(distance / step_length)));
+  var s = 1u;
+  loop {
+    if (s > steps) {
+      break;
+    }
+    let t = f32(s) / f32(steps);
+    let point = origin + delta * t;
+    if (is_solid_point(point)) {
+      return true;
+    }
+    s += 1u;
+  }
+  return false;
 }
 
 fn sample_velocity(p: vec2f) -> vec2f {
@@ -166,16 +190,16 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     tracers[i] = respawn(p);
     return;
   }
-  if (!is_solid_point(next)) {
+  if (!segment_hits_solid(p, next)) {
     tracers[i] = next;
     return;
   }
 
   let try_x = vec2f(next.x, p.y);
   let try_y = vec2f(p.x, next.y);
-  if (!is_solid_point(try_x)) {
+  if (!segment_hits_solid(p, try_x)) {
     p.x = try_x.x;
-  } else if (!is_solid_point(try_y)) {
+  } else if (!segment_hits_solid(p, try_y)) {
     p.y = try_y.y;
   }
   tracers[i] = p;

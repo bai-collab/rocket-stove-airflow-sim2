@@ -29,6 +29,49 @@ test('ignited straw is finite and raw straw decreases after heating', () => {
   const after = sim.diagnostics().rawStraw;
   assert.ok(after < before, `expected raw straw to decrease: ${before} -> ${after}`);
   assert.ok(after >= 0);
+  assert.ok(Math.abs(sim.diagnostics().organicError) < 1e-4, `organic ledger drifted: ${sim.diagnostics().organicError}`);
+});
+
+test('fuel editing updates the baseline without duplicating mass', () => {
+  const sim = new CpuRocketSimulation();
+  sim.clearScene();
+
+  sim.setToolAt('fuel', 0, 0);
+  assert.ok(Math.abs(sim.initialOrganic - 1) < 1e-6);
+  assert.ok(Math.abs(sim.initialMineral - 0.12) < 1e-6);
+
+  sim.setToolAt('erase', 0, 0);
+  assert.equal(sim.initialOrganic, 0);
+  assert.equal(sim.initialMineral, 0);
+
+  sim.setToolAt('fuel', 0, 0);
+  assert.ok(Math.abs(sim.initialOrganic - 1) < 1e-6);
+  assert.ok(Math.abs(sim.initialMineral - 0.12) < 1e-6);
+});
+
+test('opening a wall restores a clean ambient fluid cell', () => {
+  const sim = new CpuRocketSimulation();
+  sim.clearScene();
+  sim.setToolAt('wall', 24, 0);
+  sim.temperature[2] = 500;
+  sim.oxygen[2] = 0;
+  sim.smoke[2] = 0.4;
+
+  sim.setToolAt('erase', 24, 0);
+  assert.equal(sim.solid[2], 0);
+  assert.equal(sim.temperature[2], 25);
+  assert.equal(sim.oxygen[2], 1);
+  assert.equal(sim.smoke[2], 0);
+});
+
+test('CPU tracers use swept collision instead of endpoint-only collision', () => {
+  const sim = new CpuRocketSimulation();
+  sim.clearScene();
+  sim.setToolAt('wall', 24, 0);
+
+  assert.equal(sim.isSolidPoint(30, 6), true);
+  assert.equal(sim.isSolidPoint(60, 6), false);
+  assert.equal(sim.segmentHitsSolid(0, 6, 60, 6), true);
 });
 
 test('sealed stove does not keep fuel-zone oxygen at ambient after combustion starts', () => {

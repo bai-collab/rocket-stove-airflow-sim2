@@ -2,16 +2,16 @@ project:
   name: rocket-stove-airflow-sim2
   source_repository: https://github.com/bai-collab/rocket-stove-airflow-sim
   target_repository: https://github.com/bai-collab/rocket-stove-airflow-sim2
-  version: "0.4.0 · Physics v3 + VGPU"
+  version: "0.5.0 · Physics v3 + VGPU"
 
 status:
   repository_creation: completed
   old_repository_modified: false
-  phase: phase_4_gpu_physics_v3_complete
+  phase: phase_5_gpu_tracers_rendering_hardening
   live_browser_backend: auto_cpu_or_gpu_physics_v3
-  gpu_backend_authority: reaction_and_transport_parity_verified
+  gpu_backend_authority: reaction_and_transport_parity_verified_with_local_hardening
   cpu_backend_authority: physics_v3_reference_oracle_and_fallback
-  ci: passing
+  ci: pending_after_local_fixes
 
 implemented:
   cpu_reference:
@@ -33,8 +33,8 @@ implemented:
     - Auto / CPU / GPU backend selector
     - backend preference persisted in localStorage
     - WebGPU initialization/runtime fallback to CPU
-    - Canvas2D field/tracer rendering from synchronized CPU mirror
-    - Phase 4 status and model explanation
+    - GPU field/tracer rendering with transparent Canvas2D editor overlay
+    - Phase 5 status and model explanation
 
   gpu_storage:
     static_or_geometry:
@@ -58,7 +58,8 @@ implemented:
       - mineralMatter
       - ash
     diagnostics:
-      - scalar-outflow reduction scratch
+      - scalar-outflow vec4 reduction scratch (smoke / volatile / exhaust)
+      - scalar-mass reduction and normalization scratch
       - secondary-reaction reduction scratch
 
   gpu_physics_pipeline:
@@ -73,11 +74,12 @@ implemented:
     - pressure projection
     - global open-boundary velocity flux correction
     - wall-safe scalar advection
+    - conservative gas scalar advection correction
     - cooling and scalar clamping
     - secondary residence update
     - secondary smoke oxidation
     - open-boundary fresh-air scalar exchange
-    - smoke/volatile outflow reduction
+    - smoke/volatile/exhaust outflow reduction
     - secondary-reaction reduction
 
   phase_4_state_ownership:
@@ -91,21 +93,21 @@ implemented:
     cpu_mirror:
       - geometry/editor source state
       - diagnostics presentation
-      - Canvas2D rendering arrays
+      - low-frequency diagnostic mirror and CPU fallback arrays
       - tracer particles
       - fallback reference solver
     synchronization:
       - full CPU-to-GPU upload when GPU mode starts
       - full CPU-to-GPU upload after preset/clear/geometry edits
       - no normal per-tick CPU-to-GPU field upload
-      - GPU-to-CPU state handoff remains once per physics tick for current Canvas2D/tracer UI
+      - GPU-to-CPU full state checkpoint every 6 physics ticks; small outflow/reaction readbacks each tick
       - GPU runtime failure restores clock state and recomputes the current tick once on CPU
 
 validation:
   github_actions:
     cpu_physics_invariants: success
     typescript_strict_typecheck: success
-    wgsl_matrix_entries: 16
+    wgsl_matrix_entries: 22
     all_wgsl_validation: success
     portable_software_adapter_install: success
     vgpu_doctor_real_adapter_check: success
@@ -115,6 +117,8 @@ validation:
     vgpu_cooling_residence_gpu_parity: success
     vgpu_secondary_combustion_gpu_parity: success
     vite_production_build: success
+    local_cpu_tests_after_hardening: success
+    local_gpu_tests_after_hardening: success
   gpu_reaction_parity:
     - pyrolysis + volatile combustion + char oxidation against CPU formulas
     - cooling + residence update against CPU operator order
@@ -157,13 +161,10 @@ completed:
     - reaction numerical parity tests
 
 next:
-  phase_5_gpu_tracers_and_rendering:
-    - migrate tracer particles to GPU storage/compute
-    - render temperature/smoke/velocity fields directly with WebGPU
-    - keep DOM/Canvas overlay only for editor UI if useful
-    - reduce full-field GPU-to-CPU readback to lower-frequency diagnostics
+  phase_6_browser_release_validation:
     - add browser CPU/GPU visual parity tests
     - add WebGPU device capability diagnostics
+    - verify public Pages separately from this local hardening change
 
 later:
   - performance profiling and buffer bandwidth measurements

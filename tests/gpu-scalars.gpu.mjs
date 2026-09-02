@@ -12,7 +12,15 @@ const boundaryShader = await readFile(
   'utf8'
 );
 const reduceShader = await readFile(
-  new URL('../src/gpu/shaders/airflow/reduce-vec2.wgsl', import.meta.url),
+  new URL('../src/gpu/shaders/airflow/reduce-vec4.wgsl', import.meta.url),
+  'utf8'
+);
+const massStatsShader = await readFile(
+  new URL('../src/gpu/shaders/scalar/scalar-mass-stats.wgsl', import.meta.url),
+  'utf8'
+);
+const normalizeShader = await readFile(
+  new URL('../src/gpu/shaders/scalar/normalize-scalar.wgsl', import.meta.url),
   'utf8'
 );
 
@@ -102,19 +110,28 @@ function cpuBoundaryExchange(state, solid, velocity, nx, ny, h, dt) {
   const exhaustGas = new Float32Array(state.exhaustGas);
   let smokeOut = 0;
   let volatileOut = 0;
+  let exhaustOut = 0;
 
   const freshen = (i, rate) => {
     const k = clamp(rate * dt, 0, 1);
     temperature[i] += (25 - temperature[i]) * k;
     oxygen[i] += (1 - oxygen[i]) * k;
+    smokeOut += smoke[i] * k;
+    volatileOut += volatileGas[i] * k;
+    exhaustOut += exhaustGas[i] * k;
     smoke[i] *= 1 - k;
     volatileGas[i] *= 1 - k;
     exhaustGas[i] *= 1 - k;
   };
   const recordOut = (i, outward) => {
     if (outward <= 0 || solid[i]) return;
-    smokeOut += smoke[i] * outward * dt / h;
-    volatileOut += volatileGas[i] * outward * dt / h;
+    const k = clamp(outward * dt / h, 0, 1);
+    smokeOut += smoke[i] * k;
+    volatileOut += volatileGas[i] * k;
+    exhaustOut += exhaustGas[i] * k;
+    smoke[i] *= 1 - k;
+    volatileGas[i] *= 1 - k;
+    exhaustGas[i] *= 1 - k;
   };
 
   for (let x = 0; x < nx; x += 1) {
@@ -146,7 +163,7 @@ function cpuBoundaryExchange(state, solid, velocity, nx, ny, h, dt) {
     }
   }
 
-  return { temperature, oxygen, smoke, volatileGas, exhaustGas, smokeOut, volatileOut };
+  return { temperature, oxygen, smoke, volatileGas, exhaustGas, smokeOut, volatileOut, exhaustOut };
 }
 
 function assertFloatArrayClose(actual, expected, epsilon = 2e-4) {
@@ -275,7 +292,7 @@ test('VGPU open-boundary scalar exchange and outflow totals match CPU', async (t
   const smoke = storage(gpu, count * 4, 'read-write');
   const volatileGas = storage(gpu, count * 4, 'read-write');
   const exhaustGas = storage(gpu, count * 4, 'read-write');
-  const outflow = pingPongStorage(gpu, count * 8);
+  const outflow = pingPongStorage(gpu, count * 16);
 
   try {
     solid.write(solidData);
@@ -285,8 +302,8 @@ test('VGPU open-boundary scalar exchange and outflow totals match CPU', async (t
     smoke.write(state.smoke);
     volatileGas.write(state.volatileGas);
     exhaustGas.write(state.exhaustGas);
-    outflow.read.write(new Float32Array(count * 2));
-    outflow.write.write(new Float32Array(count * 2));
+    outflow.read.write(new Float32Array(count * 4));
+    outflow.write.write(new Float32Array(count * 4));
 
     const boundary = compute(gpu, boundaryShader, {
       label: 'test:scalar-boundary',
@@ -329,6 +346,7 @@ test('VGPU open-boundary scalar exchange and outflow totals match CPU', async (t
     const totals = new Float32Array(await outflow.read.read());
     assert.ok(Math.abs((totals[0] ?? 0) - expected.smokeOut) < 2e-4, `smokeOut expected ${expected.smokeOut}, got ${totals[0]}`);
     assert.ok(Math.abs((totals[1] ?? 0) - expected.volatileOut) < 2e-4, `volatileOut expected ${expected.volatileOut}, got ${totals[1]}`);
+    assert.ok(Math.abs((totals[2] ?? 0) - expected.exhaustOut) < 2e-4, `exhaustOut expected ${expected.exhaustOut}, got ${totals[2]}`);
   } finally {
     solid.destroy();
     velocity.destroy();
@@ -339,6 +357,109 @@ test('VGPU open-boundary scalar exchange and outflow totals match CPU', async (t
     exhaustGas.destroy();
     outflow.read.destroy();
     outflow.write.destroy();
+    gpu.dispose();
+  }
+});
+
+test('VGPU gas scalar normalization restores the source mass after advection', async (t) => {
+  const gpu = await makeGpu(t);
+  if (!gpu) return;
+
+  const nx = 4;
+  const ny = 2;
+  const h = 12;
+  const dt = 0.35;
+  const traceStep = Math.max(2, h * 0.35);
+  const count = nx * ny;
+  const fallback = 0;
+  const solidData = new Uint32Array(count);
+  solidData[5] = 1;
+  const srcData = Float32Array.from([0.2, 0.7, 0.1, 0.4, 0.6, 0, 0.3, 0.9]);
+  const velocityData = new Float32Array(count * 2);
+  for (let i = 0; i < count; i += 1) {
+    velocityData[i * 2] = i % nx === 0 ? 24 : 8;
+    velocityData[i * 2 + 1] = i < nx ? 10 : -6;
+  }
+
+  const solid = storage(gpu, count * 4, 'read');
+  const velocity = storage(gpu, count * 8, 'read');
+  const src = storage(gpu, count * 4, 'read');
+  const dst = storage(gpu, count * 4, 'read-write');
+  const stats = pingPongStorage(gpu, count * 16);
+
+  try {
+    solid.write(solidData);
+    velocity.write(velocityData);
+    src.write(srcData);
+    dst.write(new Float32Array(count));
+    stats.read.write(new Float32Array(count * 4));
+    stats.write.write(new Float32Array(count * 4));
+
+    compute(gpu, advectShader, {
+      set: {
+        params: { dt, h, fallback, trace_step: traceStep, nx, ny, wall_safe: 1, _pad: 0 },
+        solid,
+        velocity,
+        scalar_src: src,
+        scalar_dst: dst,
+      },
+    }).dispatch(Math.ceil(count / 64));
+
+    const expectedAdvected = cpuAdvectScalar(srcData, solidData, velocityData, nx, ny, h, dt, fallback, traceStep);
+    compute(gpu, massStatsShader, {
+      set: {
+        params: { cell_count: count, _pad0: 0, _pad1: 0, _pad2: 0 },
+        solid,
+        scalar_src: src,
+        scalar_dst: dst,
+        stats: stats.write,
+      },
+    }).dispatch(Math.ceil(count / 64));
+    stats.swap();
+
+    const reduce = compute(gpu, reduceShader, { label: 'test:scalar-mass-reduce' });
+    let inputCount = count;
+    while (inputCount > 1) {
+      const outputCount = Math.ceil(inputCount / 2);
+      reduce
+        .set({
+          params: { input_count: inputCount, _pad0: 0, _pad1: 0, _pad2: 0 },
+          src: stats.read,
+          dst: stats.write,
+        })
+        .dispatch(Math.ceil(outputCount / 64));
+      stats.swap();
+      inputCount = outputCount;
+    }
+
+    compute(gpu, normalizeShader, {
+      set: {
+        params: { source_epsilon: 1e-8, cell_count: count, _pad0: 0, _pad1: 0 },
+        solid,
+        scalar: dst,
+        totals: stats.read,
+      },
+    }).dispatch(Math.ceil(count / 64));
+
+    const actual = new Float32Array(await dst.read());
+    let sourceTotal = 0;
+    let destinationTotal = 0;
+    for (let i = 0; i < count; i += 1) {
+      if (solidData[i]) continue;
+      sourceTotal += Math.max(0, srcData[i]);
+      destinationTotal += Math.max(0, expectedAdvected[i]);
+    }
+    assert.ok(destinationTotal > 1e-8);
+    const correction = sourceTotal / destinationTotal;
+    const expected = expectedAdvected.map((value, i) => solidData[i] ? 0 : Math.max(0, value * correction));
+    assertFloatArrayClose(actual, expected);
+  } finally {
+    solid.destroy();
+    velocity.destroy();
+    src.destroy();
+    dst.destroy();
+    stats.read.destroy();
+    stats.write.destroy();
     gpu.dispose();
   }
 });

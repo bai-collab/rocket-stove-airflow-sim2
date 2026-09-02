@@ -176,6 +176,7 @@ function renderMetrics() {
     metric('邊界進流', d.inflow.toFixed(2)),
     metric('邊界出流', d.outflow.toFixed(2)),
     metric('未燃揮發氣體', d.volatileGas.toFixed(3)),
+    metric('尾氣排出累積', d.exhaustOut.toFixed(3)),
     metric('平均溫度', `${d.averageTemperature.toFixed(1)} °C`),
     metric('有機守恆誤差', d.organicError.toExponential(2)),
     metric('礦物守恆誤差', d.mineralError.toExponential(2)),
@@ -353,8 +354,8 @@ presetGrid.innerHTML = Object.entries(STOVE_PRESETS)
   .map(([id, preset]) => `<button data-preset="${id}"><strong>${preset.label}</strong><small>${preset.description}</small></button>`)
   .join('');
 
-function loadPreset(id: string) {
-  if (!controller.loadPreset(id)) return;
+async function loadPreset(id: string) {
+  if (!await controller.loadPreset(id)) return;
   selectedPreset = id;
   const preset = STOVE_PRESETS[id as keyof typeof STOVE_PRESETS];
   presetDescription.textContent = preset.description;
@@ -369,20 +370,28 @@ function loadPreset(id: string) {
 
 presetGrid.addEventListener('click', (event) => {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-preset]');
-  if (button?.dataset.preset) loadPreset(button.dataset.preset);
+  if (button?.dataset.preset) {
+    void loadPreset(button.dataset.preset).catch((error) => console.error('Preset load failed', error));
+  }
 });
 
-igniteButton.addEventListener('click', () => controller.ignite());
-pauseButton.addEventListener('click', () => {
-  controller.pause();
-  pauseButton.textContent = sim.running ? '暫停' : '繼續';
+igniteButton.addEventListener('click', () => {
+  void controller.ignite().catch((error) => console.error('Ignition failed', error));
 });
-resetButton.addEventListener('click', () => loadPreset(selectedPreset));
+pauseButton.addEventListener('click', () => {
+  void controller.pause().then(() => {
+    pauseButton.textContent = sim.running ? '暫停' : '繼續';
+  }).catch((error) => console.error('Pause failed', error));
+});
+resetButton.addEventListener('click', () => {
+  void loadPreset(selectedPreset).catch((error) => console.error('Preset reset failed', error));
+});
 clearButton.addEventListener('click', () => {
-  controller.clearScene();
-  accumulator = 0;
-  drawPresentation();
-  renderMetrics();
+  void controller.clearScene().then(() => {
+    accumulator = 0;
+    drawPresentation();
+    renderMetrics();
+  }).catch((error) => console.error('Scene clear failed', error));
 });
 speedInput.addEventListener('input', () => {
   speedValue.value = `${speedInput.value}×`;
@@ -430,7 +439,7 @@ function frameLoop(now: number) {
 const storedBackend = localStorage.getItem('rocket-stove-backend');
 const initialBackend: BackendPreference = isBackendPreference(storedBackend) ? storedBackend : 'auto';
 backendSelect.value = initialBackend;
-loadPreset(selectedPreset);
+await loadPreset(selectedPreset);
 await controller.initialize(initialBackend);
 requestAnimationFrame(frameLoop);
 

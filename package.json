@@ -6,19 +6,20 @@
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "test:gpu": "node --test --test-concurrency=1 tests/*.gpu.mjs",
+    "test:all": "npm test && npm run typecheck && npm run check:wgsl && npm run test:gpu && npm run build",
     "typecheck": "tsc --noEmit",
     "dev": "vite",
     "build": "vite build",
-    "check:wgsl": "vgpu check src/gpu/shaders/airflow/advect-velocity.wgsl && vgpu check src/gpu/shaders/airflow/boundary-flux-correct.wgsl && vgpu check src/gpu/shaders/airflow/boundary-flux-stats.wgsl && vgpu check src/gpu/shaders/airflow/buoyancy.wgsl && vgpu check src/gpu/shaders/airflow/divergence.wgsl && vgpu check src/gpu/shaders/airflow/pressure-jacobi.wgsl && vgpu check src/gpu/shaders/airflow/project.wgsl && vgpu check src/gpu/shaders/airflow/reduce-vec2.wgsl && vgpu check src/gpu/shaders/scalar/advect-scalar.wgsl && vgpu check src/gpu/shaders/scalar/open-boundary-exchange.wgsl && vgpu check src/gpu/shaders/fuel/scaffold-check.wgsl && vgpu check src/gpu/shaders/fuel/pyrolysis-pass.wgsl && vgpu check src/gpu/shaders/fuel/volatile-combustion.wgsl && vgpu check src/gpu/shaders/fuel/char-oxidation-pass.wgsl && vgpu check src/gpu/shaders/combustion/cooling-residence.wgsl && vgpu check src/gpu/shaders/combustion/secondary-combustion.wgsl && vgpu check src/gpu/shaders/tracer/tracer-update.wgsl && vgpu check src/gpu/shaders/render/field-render.wgsl && vgpu check src/gpu/shaders/render/tracer-render.wgsl"
+    "check:wgsl": "vgpu check src/gpu/shaders/airflow/advect-velocity.wgsl && vgpu check src/gpu/shaders/airflow/boundary-flux-correct.wgsl && vgpu check src/gpu/shaders/airflow/boundary-flux-stats.wgsl && vgpu check src/gpu/shaders/airflow/buoyancy.wgsl && vgpu check src/gpu/shaders/airflow/divergence.wgsl && vgpu check src/gpu/shaders/airflow/pressure-jacobi.wgsl && vgpu check src/gpu/shaders/airflow/project.wgsl && vgpu check src/gpu/shaders/airflow/reduce-vec2.wgsl && vgpu check src/gpu/shaders/airflow/reduce-vec4.wgsl && vgpu check src/gpu/shaders/scalar/advect-scalar.wgsl && vgpu check src/gpu/shaders/scalar/open-boundary-exchange.wgsl && vgpu check src/gpu/shaders/scalar/scalar-mass-stats.wgsl && vgpu check src/gpu/shaders/scalar/normalize-scalar.wgsl && vgpu check src/gpu/shaders/fuel/scaffold-check.wgsl && vgpu check src/gpu/shaders/fuel/pyrolysis-pass.wgsl && vgpu check src/gpu/shaders/fuel/volatile-combustion.wgsl && vgpu check src/gpu/shaders/fuel/char-oxidation-pass.wgsl && vgpu check src/gpu/shaders/combustion/cooling-residence.wgsl && vgpu check src/gpu/shaders/combustion/secondary-combustion.wgsl && vgpu check src/gpu/shaders/tracer/tracer-update.wgsl && vgpu check src/gpu/shaders/render/field-render.wgsl && vgpu check src/gpu/shaders/render/tracer-render.wgsl"
   },
   "dependencies": {
-    "vgpu": "latest",
-    "@vgpu/wgsl": "latest",
-    "@vgpu/wgsl-std": "latest"
+    "vgpu": "0.3.1",
+    "@vgpu/wgsl": "0.3.1",
+    "@vgpu/wgsl-std": "0.3.1"
   },
   "devDependencies": {
-    "@webgpu/types": "latest",
-    "vite": "latest",
-    "typescript": "latest"
+    "@webgpu/types": "0.1.72",
+    "vite": "8.2.2",
+    "typescript": "7.0.2"
   }
 }

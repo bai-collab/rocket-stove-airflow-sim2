@@ -17,6 +17,7 @@ import divergenceWgsl from './shaders/airflow/divergence.wgsl';
 import pressureJacobiWgsl from './shaders/airflow/pressure-jacobi.wgsl';
 import projectWgsl from './shaders/airflow/project.wgsl';
 import reduceVec2Wgsl from './shaders/airflow/reduce-vec2.wgsl';
+import reduceVec4Wgsl from './shaders/airflow/reduce-vec4.wgsl';
 import coolingResidenceWgsl from './shaders/combustion/cooling-residence.wgsl';
 import secondaryCombustionWgsl from './shaders/combustion/secondary-combustion.wgsl';
 import charOxidationPassWgsl from './shaders/fuel/char-oxidation-pass.wgsl';
@@ -26,13 +27,18 @@ import fieldRenderWgsl from './shaders/render/field-render.wgsl';
 import tracerRenderWgsl from './shaders/render/tracer-render.wgsl';
 import advectScalarWgsl from './shaders/scalar/advect-scalar.wgsl';
 import openBoundaryExchangeWgsl from './shaders/scalar/open-boundary-exchange.wgsl';
+import normalizeScalarWgsl from './shaders/scalar/normalize-scalar.wgsl';
+import scalarMassStatsWgsl from './shaders/scalar/scalar-mass-stats.wgsl';
 import tracerUpdateWgsl from './shaders/tracer/tracer-update.wgsl';
+import { DEFAULT_FUEL_PARAMS } from '../physics/fuel-model.mjs';
 import {
   GpuFieldRegistry,
   type CpuAirflowSnapshot,
   type GpuFuelState,
   type GpuScalarState,
 } from './GpuFieldRegistry';
+
+const FUEL = DEFAULT_FUEL_PARAMS;
 
 export interface SimulationBackend {
   initialize(): Promise<void> | void;
@@ -93,9 +99,12 @@ export class GpuSimulationBackend implements SimulationBackend {
   private project: Compute | null = null;
   private boundaryFluxStats: Compute | null = null;
   private reduceVec2: Compute | null = null;
+  private reduceVec4: Compute | null = null;
   private boundaryFluxCorrect: Compute | null = null;
   private advectScalar: Compute | null = null;
   private openBoundaryExchange: Compute | null = null;
+  private scalarMassStats: Compute | null = null;
+  private normalizeScalar: Compute | null = null;
   private pyrolysisPass: Compute | null = null;
   private volatileCombustion: Compute | null = null;
   private charOxidationPass: Compute | null = null;
@@ -153,9 +162,12 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.project = compute(this.gpu, projectWgsl, { label: 'rocket-stove-airflow:project' });
     this.boundaryFluxStats = compute(this.gpu, boundaryFluxStatsWgsl, { label: 'rocket-stove-airflow:boundary-flux-stats' });
     this.reduceVec2 = compute(this.gpu, reduceVec2Wgsl, { label: 'rocket-stove-airflow:reduce-vec2' });
+    this.reduceVec4 = compute(this.gpu, reduceVec4Wgsl, { label: 'rocket-stove-airflow:reduce-vec4' });
     this.boundaryFluxCorrect = compute(this.gpu, boundaryFluxCorrectWgsl, { label: 'rocket-stove-airflow:boundary-flux-correct' });
     this.advectScalar = compute(this.gpu, advectScalarWgsl, { label: 'rocket-stove-airflow:advect-scalar' });
     this.openBoundaryExchange = compute(this.gpu, openBoundaryExchangeWgsl, { label: 'rocket-stove-airflow:open-boundary-scalars' });
+    this.scalarMassStats = compute(this.gpu, scalarMassStatsWgsl, { label: 'rocket-stove-airflow:scalar-mass-stats' });
+    this.normalizeScalar = compute(this.gpu, normalizeScalarWgsl, { label: 'rocket-stove-airflow:normalize-scalar' });
     this.pyrolysisPass = compute(this.gpu, pyrolysisPassWgsl, { label: 'rocket-stove-airflow:pyrolysis' });
     this.volatileCombustion = compute(this.gpu, volatileCombustionWgsl, { label: 'rocket-stove-airflow:volatile-combustion' });
     this.charOxidationPass = compute(this.gpu, charOxidationPassWgsl, { label: 'rocket-stove-airflow:char-oxidation' });
@@ -217,7 +229,7 @@ export class GpuSimulationBackend implements SimulationBackend {
         h: this.h,
         sim_width: this.simWidth,
         sim_height: this.simHeight,
-        ambient_temperature: 25,
+        ambient_temperature: FUEL.ambientTemperature,
         nx: this.nx,
         ny: this.ny,
         _pad0: 0,
@@ -284,7 +296,7 @@ export class GpuSimulationBackend implements SimulationBackend {
     return this.requireFields().readBoundaryFluxTotal();
   }
 
-  async readScalarOutflowTotal(): Promise<{ smokeOut: number; volatileOut: number }> {
+  async readScalarOutflowTotal(): Promise<{ smokeOut: number; volatileOut: number; exhaustOut: number }> {
     return this.requireFields().readScalarOutflowTotal();
   }
 
@@ -299,11 +311,12 @@ export class GpuSimulationBackend implements SimulationBackend {
     fields.resetPressure();
     fields.resetBoundaryFlux();
     fields.resetScalarOutflow();
+    fields.resetScalarMassStats();
     fields.resetSecondaryReaction();
   }
 
   dispose(): void {
-    if (!this.initialized) return;
+    if (!this.initialized && !this.gpu && !this.fields) return;
     this.renderSurface = null;
     this.fieldEffect = null;
     this.tracerDraw = null;
@@ -317,9 +330,12 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.project = null;
     this.boundaryFluxStats = null;
     this.reduceVec2 = null;
+    this.reduceVec4 = null;
     this.boundaryFluxCorrect = null;
     this.advectScalar = null;
     this.openBoundaryExchange = null;
+    this.scalarMassStats = null;
+    this.normalizeScalar = null;
     this.pyrolysisPass = null;
     this.volatileCombustion = null;
     this.charOxidationPass = null;
@@ -338,14 +354,14 @@ export class GpuSimulationBackend implements SimulationBackend {
         params: {
           dt,
           ignition_active: ignitionActive ? 1 : 0,
-          pyrolysis_start_temperature: 140,
-          pyrolysis_full_temperature: 420,
-          pyrolysis_rate: 0.22,
-          char_yield: 0.34,
-          volatile_yield: 0.66,
-          ignition_heat_rate: 230,
-          ambient_temperature: 25,
-          max_temperature: 700,
+          pyrolysis_start_temperature: FUEL.pyrolysisStartTemperature,
+          pyrolysis_full_temperature: FUEL.pyrolysisFullTemperature,
+          pyrolysis_rate: FUEL.pyrolysisRate,
+          char_yield: FUEL.charYield,
+          volatile_yield: FUEL.volatileYield,
+          ignition_heat_rate: FUEL.ignitionHeatRate,
+          ambient_temperature: FUEL.ambientTemperature,
+          max_temperature: FUEL.maxTemperature,
           cell_count: this.cellCount,
           _pad0: 0,
         },
@@ -362,14 +378,15 @@ export class GpuSimulationBackend implements SimulationBackend {
         params: {
           dt,
           h: this.h,
-          burn_start_temperature: 180,
-          burn_full_temperature: 520,
-          burn_rate: 2.2,
-          oxygen_use: 0.34,
-          heat_gain: 185,
-          clean_smoke_yield: 0.02,
-          dirty_smoke_yield: 0.58,
-          max_temperature: 700,
+          burn_start_temperature: FUEL.volatileBurnStartTemperature,
+          burn_full_temperature: FUEL.volatileBurnFullTemperature,
+          burn_rate: FUEL.volatileBurnRate,
+          oxygen_use: FUEL.volatileOxygenUse,
+          heat_gain: FUEL.volatileHeatGain,
+          clean_smoke_yield: FUEL.cleanSmokeYield,
+          dirty_smoke_yield: FUEL.dirtySmokeYield,
+          max_temperature: FUEL.maxTemperature,
+          ambient_temperature: FUEL.ambientTemperature,
           nx: this.nx,
           ny: this.ny,
         },
@@ -387,11 +404,12 @@ export class GpuSimulationBackend implements SimulationBackend {
       .set({
         params: {
           dt,
-          oxidation_rate: 0.5,
-          oxygen_use: 0.44,
-          heat_gain: 135,
-          ash_exposure_per_char: 0.18,
-          max_temperature: 700,
+          oxidation_rate: FUEL.charOxidationRate,
+          oxygen_use: FUEL.charOxygenUse,
+          heat_gain: FUEL.charHeatGain,
+          ash_exposure_per_char: FUEL.ashExposurePerCharOxidized,
+          max_temperature: FUEL.maxTemperature,
+          ambient_temperature: FUEL.ambientTemperature,
           cell_count: this.cellCount,
           _pad0: 0,
         },
@@ -412,8 +430,8 @@ export class GpuSimulationBackend implements SimulationBackend {
       .set({
         params: {
           dt,
-          ambient_temperature: 25,
-          max_temperature: 700,
+          ambient_temperature: FUEL.ambientTemperature,
+          max_temperature: FUEL.maxTemperature,
           cooling_rate: 0.018,
           residence_max: 2,
           residence_decay_rate: 1.6,
@@ -443,10 +461,11 @@ export class GpuSimulationBackend implements SimulationBackend {
         params: {
           dt,
           h: this.h,
-          oxidation_rate: 0.55,
-          oxygen_use: 0.14,
-          heat_gain: 85,
-          max_temperature: 700,
+          oxidation_rate: FUEL.secondarySmokeOxidationRate,
+          oxygen_use: FUEL.secondarySmokeOxygenUse,
+          heat_gain: FUEL.secondaryHeatGain,
+          max_temperature: FUEL.maxTemperature,
+          ambient_temperature: FUEL.ambientTemperature,
           residence_scale: 0.75,
           _pad0: 0,
           nx: this.nx,
@@ -498,8 +517,8 @@ export class GpuSimulationBackend implements SimulationBackend {
       .set({
         params: {
           dt,
-          ambient_temperature: 25,
-          max_delta_temperature: 160,
+          ambient_temperature: FUEL.ambientTemperature,
+          max_delta_temperature: FUEL.maxTemperature - FUEL.ambientTemperature,
           acceleration_scale: 40,
         },
         temperature: fields.temperature.read,
@@ -564,15 +583,21 @@ export class GpuSimulationBackend implements SimulationBackend {
 
   private advectScalarFields(dt: number, workgroups: number): void {
     const fields = this.requireFields();
-    this.advectOneScalar(fields.temperature, 25, dt, workgroups);
+    this.advectOneScalar(fields.temperature, FUEL.ambientTemperature, dt, workgroups);
     this.advectOneScalar(fields.oxygen, 1, dt, workgroups);
-    this.advectOneScalar(fields.smoke, 0, dt, workgroups);
-    this.advectOneScalar(fields.volatileGas, 0, dt, workgroups);
-    this.advectOneScalar(fields.exhaustGas, 0, dt, workgroups);
+    this.advectOneScalar(fields.smoke, 0, dt, workgroups, true);
+    this.advectOneScalar(fields.volatileGas, 0, dt, workgroups, true);
+    this.advectOneScalar(fields.exhaustGas, 0, dt, workgroups, true);
     this.advectOneScalar(fields.secondaryResidence, 0, dt, workgroups);
   }
 
-  private advectOneScalar(pair: PingPongStorage, fallback: number, dt: number, workgroups: number): void {
+  private advectOneScalar(
+    pair: PingPongStorage,
+    fallback: number,
+    dt: number,
+    workgroups: number,
+    conserve = false,
+  ): void {
     const fields = this.requireFields();
     this.requirePass(this.advectScalar, 'advectScalar')
       .set({
@@ -593,6 +618,42 @@ export class GpuSimulationBackend implements SimulationBackend {
       })
       .dispatch(workgroups);
     pair.swap();
+    if (conserve) this.conserveScalar(pair, workgroups);
+  }
+
+  private conserveScalar(pair: PingPongStorage, workgroups: number): void {
+    const fields = this.requireFields();
+    fields.resetScalarMassStats();
+    this.requirePass(this.scalarMassStats, 'scalarMassStats')
+      .set({
+        params: {
+          cell_count: this.cellCount,
+          _pad0: 0,
+          _pad1: 0,
+          _pad2: 0,
+        },
+        solid: fields.solid,
+        scalar_src: pair.write,
+        scalar_dst: pair.read,
+        stats: fields.scalarMassStats.write,
+      })
+      .dispatch(workgroups);
+    fields.scalarMassStats.swap();
+    this.reduceVec4Buffer(fields.scalarMassStats, this.cellCount);
+
+    this.requirePass(this.normalizeScalar, 'normalizeScalar')
+      .set({
+        params: {
+          source_epsilon: 1e-8,
+          cell_count: this.cellCount,
+          _pad0: 0,
+          _pad1: 0,
+        },
+        solid: fields.solid,
+        scalar: pair.read,
+        totals: fields.scalarMassStats.read,
+      })
+      .dispatch(workgroups);
   }
 
   private exchangeOpenBoundaryScalars(dt: number, workgroups: number): void {
@@ -604,7 +665,7 @@ export class GpuSimulationBackend implements SimulationBackend {
         params: {
           dt,
           h: this.h,
-          ambient_temperature: 25,
+          ambient_temperature: FUEL.ambientTemperature,
           ambient_oxygen: 1,
           nx: this.nx,
           ny: this.ny,
@@ -623,7 +684,7 @@ export class GpuSimulationBackend implements SimulationBackend {
       .dispatch(workgroups);
     fields.scalarOutflow.swap();
 
-    this.reduceVec2Buffer(fields.scalarOutflow, this.cellCount);
+    this.reduceVec4Buffer(fields.scalarOutflow, this.cellCount);
   }
 
   private balanceBoundaryFlux(workgroups: number): void {
@@ -656,6 +717,23 @@ export class GpuSimulationBackend implements SimulationBackend {
 
   private reduceVec2Buffer(pair: PingPongStorage, initialCount: number): void {
     const reduce = this.requirePass(this.reduceVec2, 'reduceVec2');
+    let inputCount = initialCount;
+    while (inputCount > 1) {
+      const outputCount = Math.ceil(inputCount / 2);
+      reduce
+        .set({
+          params: { input_count: inputCount, _pad0: 0, _pad1: 0, _pad2: 0 },
+          src: pair.read,
+          dst: pair.write,
+        })
+        .dispatch(Math.ceil(outputCount / 64));
+      pair.swap();
+      inputCount = outputCount;
+    }
+  }
+
+  private reduceVec4Buffer(pair: PingPongStorage, initialCount: number): void {
+    const reduce = this.requirePass(this.reduceVec4, 'reduceVec4');
     let inputCount = initialCount;
     while (inputCount > 1) {
       const outputCount = Math.ceil(inputCount / 2);

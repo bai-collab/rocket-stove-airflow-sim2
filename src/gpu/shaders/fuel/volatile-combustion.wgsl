@@ -9,6 +9,7 @@ struct VolatileCombustionParams {
   clean_smoke_yield: f32,
   dirty_smoke_yield: f32,
   max_temperature: f32,
+  ambient_temperature: f32,
   nx: u32,
   ny: u32,
 };
@@ -74,7 +75,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     vg -= burned;
     o2 = clamp(o2 - burned * params.oxygen_use, 0.0, 1.0);
     exhaust += burned;
-    t = clamp(t + burned * params.heat_gain, 25.0, params.max_temperature);
+    t = clamp(t + burned * params.heat_gain, params.ambient_temperature, params.max_temperature);
   }
 
   let hot_enough_to_smoke = smooth_unit((t - 110.0) / 180.0);

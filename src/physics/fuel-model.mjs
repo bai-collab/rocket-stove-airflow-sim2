@@ -4,8 +4,13 @@ const smoothstep = (x) => {
   return t * t * (3 - 2 * t);
 };
 
+// Canonical Physics v3 fuel parameters. CPU, GPU host uniforms and tests all
+// import this object; WGSL keeps the same field names in its parameter blocks.
 export const DEFAULT_FUEL_PARAMS = Object.freeze({
   ambientTemperature: 25,
+  maxTemperature: 700,
+  ignitionHeatRate: 230,
+
   pyrolysisStartTemperature: 140,
   pyrolysisFullTemperature: 420,
   pyrolysisRate: 0.22,
@@ -36,7 +41,7 @@ export function createFuelState({
   rawStraw = 1,
   mineralMatter = 0.12,
   oxygen = 1,
-  temperature = 25,
+  temperature = DEFAULT_FUEL_PARAMS.ambientTemperature,
 } = {}) {
   return {
     rawStraw,
@@ -57,6 +62,16 @@ export function createFuelState({
     smokeGeneratedTotal: 0,
     smokeOxidizedTotal: 0,
   };
+}
+
+function ignitionStep(s, dt, p) {
+  const activeFuel = s.rawStraw + s.char;
+  if (activeFuel <= 1e-8) return;
+  s.temperature = clamp(
+    s.temperature + p.ignitionHeatRate * dt,
+    p.ambientTemperature,
+    p.maxTemperature,
+  );
 }
 
 function pyrolysisStep(s, dt, p) {
@@ -102,7 +117,11 @@ function volatileCombustionStep(s, dt, env, p) {
     s.volatileGas -= burned;
     s.oxygen = clamp(s.oxygen - burned * p.volatileOxygenUse);
     s.exhaustGas += burned;
-    s.temperature += burned * p.volatileHeatGain;
+    s.temperature = clamp(
+      s.temperature + burned * p.volatileHeatGain,
+      p.ambientTemperature,
+      p.maxTemperature,
+    );
     s.volatileBurnedTotal += burned;
   }
 
@@ -139,7 +158,11 @@ function secondarySmokeOxidationStep(s, dt, env, p) {
   s.smoke -= oxidized;
   s.oxygen = clamp(s.oxygen - oxidized * p.secondarySmokeOxygenUse);
   s.exhaustGas += oxidized;
-  s.temperature += oxidized * p.secondaryHeatGain;
+  s.temperature = clamp(
+    s.temperature + oxidized * p.secondaryHeatGain,
+    p.ambientTemperature,
+    p.maxTemperature,
+  );
   s.smokeOxidizedTotal += oxidized;
 }
 
@@ -159,7 +182,11 @@ function charOxidationStep(s, dt, p) {
   s.char -= oxidized;
   s.oxygen = clamp(s.oxygen - oxidized * p.charOxygenUse);
   s.exhaustGas += oxidized;
-  s.temperature += oxidized * p.charHeatGain;
+  s.temperature = clamp(
+    s.temperature + oxidized * p.charHeatGain,
+    p.ambientTemperature,
+    p.maxTemperature,
+  );
   s.charBurnedTotal += oxidized;
 
   // Ash is exposed from the independent mineral reservoir; carbon is NOT converted to minerals.
@@ -171,12 +198,34 @@ function charOxidationStep(s, dt, p) {
   s.ash += exposed;
 }
 
-export function stepFuelModel(state, dt, env = {}, params = DEFAULT_FUEL_PARAMS) {
+/** Run ignition, pyrolysis, volatile combustion and char oxidation. */
+export function stepPrimaryFuelModel(state, dt, env = {}, params = DEFAULT_FUEL_PARAMS) {
   if (!(dt > 0)) return state;
+  if (env.ignitionActive) ignitionStep(state, dt, params);
   pyrolysisStep(state, dt, params);
   volatileCombustionStep(state, dt, env, params);
-  secondarySmokeOxidationStep(state, dt, env, params);
   charOxidationStep(state, dt, params);
+  return state;
+}
+
+/** Run only the post-transport smoke oxidation phase. */
+export function stepSecondarySmokeOxidation(
+  state,
+  dt,
+  env = {},
+  params = DEFAULT_FUEL_PARAMS,
+) {
+  if (!(dt > 0)) return state;
+  secondarySmokeOxidationStep(state, dt, env, params);
+  return state;
+}
+
+/** Convenience one-cell model used by focused fuel tests and experiments. */
+export function stepFuelModel(state, dt, env = {}, params = DEFAULT_FUEL_PARAMS) {
+  stepPrimaryFuelModel(state, dt, env, params);
+  if (env.includeSecondary !== false) {
+    stepSecondarySmokeOxidation(state, dt, env, params);
+  }
   return state;
 }
 

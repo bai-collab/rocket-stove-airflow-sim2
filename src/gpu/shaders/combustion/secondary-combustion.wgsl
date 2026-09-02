@@ -5,6 +5,7 @@ struct SecondaryCombustionParams {
   oxygen_use: f32,
   heat_gain: f32,
   max_temperature: f32,
+  ambient_temperature: f32,
   residence_scale: f32,
   _pad0: f32,
   nx: u32,
@@ -83,7 +84,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
   s -= oxidized;
   o2 = clamp(o2 - oxidized * params.oxygen_use, 0.0, 1.0);
   exhaust += oxidized;
-  t = clamp(t + oxidized * params.heat_gain, 25.0, params.max_temperature);
+  t = clamp(t + oxidized * params.heat_gain, params.ambient_temperature, params.max_temperature);
 
   smoke[i] = s;
   oxygen[i] = o2;
