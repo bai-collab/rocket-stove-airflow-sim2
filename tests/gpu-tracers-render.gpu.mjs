@@ -11,6 +11,10 @@ const fieldRenderShader = await readFile(
   new URL('../src/gpu/shaders/render/field-render.wgsl', import.meta.url),
   'utf8'
 );
+const packRenderStateShader = await readFile(
+  new URL('../src/gpu/shaders/render/pack-render-state.wgsl', import.meta.url),
+  'utf8'
+);
 const tracerRenderShader = await readFile(
   new URL('../src/gpu/shaders/render/tracer-render.wgsl', import.meta.url),
   'utf8'
@@ -117,8 +121,6 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
 
   const solidData = new Uint32Array(count);
   solidData[1] = 1;
-  const fuelMaskData = new Uint32Array(count);
-  fuelMaskData[8] = 1;
   const velocityData = new Float32Array(count * 2);
   velocityData[5 * 2] = 35;
   velocityData[5 * 2 + 1] = -12;
@@ -143,12 +145,12 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
   const raw = storage(gpu, count * 4, 'read');
   const charMass = storage(gpu, count * 4, 'read');
   const ash = storage(gpu, count * 4, 'read');
+  const renderState = storage(gpu, count * 16, 'read-write');
   const tracers = storage(gpu, tracerCount * 8, 'read');
   const screen = target(gpu, { size: [width, height], format: 'rgba8unorm' });
 
   try {
     solid.write(solidData);
-    fuelMask.write(fuelMaskData);
     velocity.write(velocityData);
     temperature.write(temperatureData);
     smoke.write(smokeData);
@@ -157,16 +159,24 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
     ash.write(ashData);
     tracers.write(tracerData);
 
-    const field = effect(gpu, fieldRenderShader, {
+    const pack = compute(gpu, packRenderStateShader, {
       set: {
-        params: { h, sim_width: simWidth, sim_height: simHeight, ambient_temperature: 25, nx, ny, _pad0: 0, _pad1: 0 },
-        solid,
-        fuel_mask: fuelMask,
-        velocity,
+        params: { cell_count: count, _pad0: 0, _pad1: 0, _pad2: 0 },
         temperature,
         smoke,
         raw_straw: raw,
         char_mass: charMass,
+        render_state: renderState,
+      },
+    });
+    pack.dispatch(1);
+
+    const field = effect(gpu, fieldRenderShader, {
+      set: {
+        params: { h, sim_width: simWidth, sim_height: simHeight, ambient_temperature: 25, nx, ny, _pad0: 0, _pad1: 0 },
+        solid,
+        velocity,
+        render_state: renderState,
         ash,
       },
     });
@@ -225,13 +235,13 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
     assert.ok(changed > 20, `expected tracer draw to change pixels, got ${changed}`);
   } finally {
     solid.destroy();
-    fuelMask.destroy();
     velocity.destroy();
     temperature.destroy();
     smoke.destroy();
     raw.destroy();
     charMass.destroy();
     ash.destroy();
+    renderState.destroy();
     tracers.destroy();
     // Offscreen targets are released with the owning VGPU instance. The
     // generic Target interface intentionally has no dispose() method.

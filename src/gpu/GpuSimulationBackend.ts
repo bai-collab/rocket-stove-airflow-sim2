@@ -24,6 +24,7 @@ import charOxidationPassWgsl from './shaders/fuel/char-oxidation-pass.wgsl';
 import pyrolysisPassWgsl from './shaders/fuel/pyrolysis-pass.wgsl';
 import volatileCombustionWgsl from './shaders/fuel/volatile-combustion.wgsl';
 import fieldRenderWgsl from './shaders/render/field-render.wgsl';
+import packRenderStateWgsl from './shaders/render/pack-render-state.wgsl';
 import tracerRenderWgsl from './shaders/render/tracer-render.wgsl';
 import advectScalarWgsl from './shaders/scalar/advect-scalar.wgsl';
 import openBoundaryExchangeWgsl from './shaders/scalar/open-boundary-exchange.wgsl';
@@ -111,6 +112,7 @@ export class GpuSimulationBackend implements SimulationBackend {
   private coolingResidence: Compute | null = null;
   private secondaryCombustion: Compute | null = null;
   private tracerUpdate: Compute | null = null;
+  private packRenderState: Compute | null = null;
   private renderSurface: ReturnType<typeof surface> | null = null;
   private fieldEffect: ReturnType<typeof effect> | null = null;
   private tracerDraw: ReturnType<typeof draw> | null = null;
@@ -174,6 +176,7 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.coolingResidence = compute(this.gpu, coolingResidenceWgsl, { label: 'rocket-stove-airflow:cooling-residence' });
     this.secondaryCombustion = compute(this.gpu, secondaryCombustionWgsl, { label: 'rocket-stove-airflow:secondary-combustion' });
     this.tracerUpdate = compute(this.gpu, tracerUpdateWgsl, { label: 'rocket-stove-airflow:tracer-update' });
+    this.packRenderState = compute(this.gpu, packRenderStateWgsl, { label: 'rocket-stove-airflow:pack-render-state' });
     this.initialized = true;
   }
 
@@ -191,6 +194,7 @@ export class GpuSimulationBackend implements SimulationBackend {
 
   uploadAirflowState(snapshot: CpuAirflowSnapshot): void {
     this.requireFields().upload(snapshot);
+    this.updateRenderState();
   }
 
   uploadTracerState(interleavedPositions: Float32Array): void {
@@ -199,10 +203,12 @@ export class GpuSimulationBackend implements SimulationBackend {
 
   step(dt: number): void {
     this.runTransport(dt, true);
+    this.updateRenderState();
   }
 
   stepTransport(dt: number): void {
     this.runTransport(dt, false);
+    this.updateRenderState();
   }
 
   stepPhysics(dt: number, options: GpuPhysicsStepOptions = {}): void {
@@ -214,6 +220,7 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.runSecondaryCombustion(dt, workgroups);
     this.exchangeOpenBoundaryScalars(dt, workgroups);
     this.runTracers(dt, options.simulationTime ?? 0);
+    this.updateRenderState();
   }
 
   renderFrame(): void {
@@ -236,12 +243,8 @@ export class GpuSimulationBackend implements SimulationBackend {
         _pad1: 0,
       },
       solid: fields.solid,
-      fuel_mask: fields.fuelMask,
       velocity: fields.velocity.read,
-      temperature: fields.temperature.read,
-      smoke: fields.smoke.read,
-      raw_straw: fields.rawStraw,
-      char_mass: fields.char,
+      render_state: fields.renderState,
       ash: fields.ash,
     });
 
@@ -342,6 +345,7 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.coolingResidence = null;
     this.secondaryCombustion = null;
     this.tracerUpdate = null;
+    this.packRenderState = null;
     this.gpu = null;
     this.initialized = false;
   }
@@ -506,6 +510,25 @@ export class GpuSimulationBackend implements SimulationBackend {
         tracers: fields.tracers,
       })
       .dispatch(Math.ceil(this.tracerCount / 64));
+  }
+
+  private updateRenderState(): void {
+    const fields = this.requireFields();
+    this.requirePass(this.packRenderState, 'packRenderState')
+      .set({
+        params: {
+          cell_count: this.cellCount,
+          _pad0: 0,
+          _pad1: 0,
+          _pad2: 0,
+        },
+        temperature: fields.temperature.read,
+        smoke: fields.smoke.read,
+        raw_straw: fields.rawStraw,
+        char_mass: fields.char,
+        render_state: fields.renderState,
+      })
+      .dispatch(Math.ceil(this.cellCount / 64));
   }
 
   private runTransport(dt: number, includeOpenBoundaryExchange: boolean): void {

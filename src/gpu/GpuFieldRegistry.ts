@@ -74,6 +74,7 @@ export class GpuFieldRegistry {
   readonly char: StorageBuffer;
   readonly mineralMatter: StorageBuffer;
   readonly ash: StorageBuffer;
+  readonly renderState: StorageBuffer;
   readonly secondaryReaction: PingPong;
   readonly tracers: StorageBuffer;
 
@@ -100,6 +101,7 @@ export class GpuFieldRegistry {
     this.char = storage(gpu, cellCount * 4, 'read-write');
     this.mineralMatter = storage(gpu, cellCount * 4, 'read-write');
     this.ash = storage(gpu, cellCount * 4, 'read-write');
+    this.renderState = storage(gpu, cellCount * 16, 'read-write');
     this.secondaryReaction = pingPongStorage(gpu, cellCount * 8);
     this.tracers = storage(gpu, tracerCount * 8, 'read-write');
     this.tracers.write(new Float32Array(tracerCount * 2).buffer);
@@ -146,6 +148,7 @@ export class GpuFieldRegistry {
     this.writeStorage(this.char, snapshot.char, 0);
     this.writeStorage(this.mineralMatter, snapshot.mineralMatter, 0);
     this.writeStorage(this.ash, snapshot.ash, 0);
+    this.writeRenderState(snapshot);
 
     this.resetPressure();
     this.resetBoundaryFlux();
@@ -296,6 +299,7 @@ export class GpuFieldRegistry {
     destroyStorage(this.char);
     destroyStorage(this.mineralMatter);
     destroyStorage(this.ash);
+    destroyStorage(this.renderState);
     this.destroyPair(this.secondaryReaction);
     destroyStorage(this.tracers);
   }
@@ -313,6 +317,18 @@ export class GpuFieldRegistry {
     if (source) data.set(source);
     else data.fill(fallback);
     buffer.write(data.buffer);
+  }
+
+  private writeRenderState(snapshot: CpuAirflowSnapshot): void {
+    const data = new Float32Array(this.cellCount * 4);
+    for (let i = 0; i < this.cellCount; i += 1) {
+      const offset = i * 4;
+      data[offset] = snapshot.temperature[i] ?? DEFAULT_FUEL_PARAMS.ambientTemperature;
+      data[offset + 1] = snapshot.smoke?.[i] ?? 0;
+      data[offset + 2] = snapshot.rawStraw?.[i] ?? 0;
+      data[offset + 3] = snapshot.char?.[i] ?? 0;
+    }
+    this.renderState.write(data.buffer);
   }
 
   private destroyPair(pair: PingPong): void {

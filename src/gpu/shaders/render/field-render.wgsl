@@ -11,13 +11,9 @@ struct RenderParams {
 
 @group(0) @binding(0) var<uniform> params: RenderParams;
 @group(0) @binding(1) var<storage, read> solid: array<u32>;
-@group(0) @binding(2) var<storage, read> fuel_mask: array<u32>;
-@group(0) @binding(3) var<storage, read> velocity: array<vec2f>;
-@group(0) @binding(4) var<storage, read> temperature: array<f32>;
-@group(0) @binding(5) var<storage, read> smoke: array<f32>;
-@group(0) @binding(6) var<storage, read> raw_straw: array<f32>;
-@group(0) @binding(7) var<storage, read> char_mass: array<f32>;
-@group(0) @binding(8) var<storage, read> ash: array<f32>;
+@group(0) @binding(2) var<storage, read> velocity: array<vec2f>;
+@group(0) @binding(3) var<storage, read> render_state: array<vec4f>;
+@group(0) @binding(4) var<storage, read> ash: array<f32>;
 
 fn cell_index(px: vec2f) -> u32 {
   let gx = min(params.nx - 1u, u32(floor(clamp(px.x, 0.0, params.sim_width - 1e-3) / params.h)));
@@ -64,19 +60,20 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
   }
 
   var color = vec3f(0.973, 0.980, 0.988);
-  let t = temperature[i];
+  let state = render_state[i];
+  let t = state.x;
   if (t > params.ambient_temperature + 8.0) {
     let heat = clamp((t - params.ambient_temperature) / 450.0, 0.0, 1.0);
     let alpha = 0.04 + heat * 0.30;
     color = mix(color, vec3f(0.961, 0.439, 0.149), alpha);
   }
 
-  let smoke_alpha = min(0.62, max(0.0, smoke[i]) * 3.4);
+  let smoke_alpha = min(0.62, max(0.0, state.y) * 3.4);
   color = mix(color, vec3f(0.098, 0.110, 0.129), smoke_alpha);
 
-  if (fuel_mask[i] != 0u) {
-    let raw = max(0.0, raw_straw[i]);
-    let c = max(0.0, char_mass[i]);
+  {
+    let raw = max(0.0, state.z);
+    let c = max(0.0, state.w);
     let a = max(0.0, ash[i]);
     let total = raw + c + a;
     if (total > 1e-7) {
