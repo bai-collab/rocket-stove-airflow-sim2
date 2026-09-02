@@ -1,4 +1,4 @@
-import { pingPongStorage, storage, type Gpu, type StorageBuffer } from 'vgpu';
+import { pingPongStorage, storage, type Buffer, type Gpu, type StorageBuffer } from 'vgpu';
 import { DEFAULT_FUEL_PARAMS } from '../physics/fuel-model.mjs';
 
 export type CpuAirflowSnapshot = {
@@ -36,12 +36,14 @@ export type GpuFuelState = {
 
 type PingPong = ReturnType<typeof pingPongStorage>;
 
-type DestroyableStorageBuffer = StorageBuffer & {
+type GpuBuffer = StorageBuffer | Buffer;
+
+type DestroyableStorageBuffer = GpuBuffer & {
   destroy?: () => void;
   readonly buffer?: { destroy(): void };
 };
 
-function destroyStorage(buffer: StorageBuffer): void {
+function destroyStorage(buffer: GpuBuffer): void {
   const resource = buffer as DestroyableStorageBuffer;
   if (typeof resource.destroy === 'function') {
     resource.destroy();
@@ -76,7 +78,8 @@ export class GpuFieldRegistry {
   readonly ash: StorageBuffer;
   readonly renderState: StorageBuffer;
   readonly secondaryReaction: PingPong;
-  readonly tracers: StorageBuffer;
+  /** Shared compute/vertex buffer: xy position, z temperature, w reserved. */
+  readonly tracers: Buffer;
 
   constructor(gpu: Gpu, cellCount: number, tracerCount = 320) {
     this.cellCount = cellCount;
@@ -103,8 +106,12 @@ export class GpuFieldRegistry {
     this.ash = storage(gpu, cellCount * 4, 'read-write');
     this.renderState = storage(gpu, cellCount * 16, 'read-write');
     this.secondaryReaction = pingPongStorage(gpu, cellCount * 8);
-    this.tracers = storage(gpu, tracerCount * 8, 'read-write');
-    this.tracers.write(new Float32Array(tracerCount * 2).buffer);
+    this.tracers = gpu.device.createBuffer({
+      size: tracerCount * 16,
+      usage: ['storage', 'vertex', 'copy_dst', 'copy_src'],
+      label: 'rocket-stove-airflow:tracers',
+    });
+    this.tracers.write(new Float32Array(tracerCount * 4).buffer);
   }
 
   upload(snapshot: CpuAirflowSnapshot): void {
@@ -163,7 +170,11 @@ export class GpuFieldRegistry {
         `tracer position length ${interleavedPositions.length} does not match ${this.tracerCount * 2}`
       );
     }
-    const upload = new Float32Array(interleavedPositions);
+    const upload = new Float32Array(this.tracerCount * 4);
+    for (let i = 0; i < this.tracerCount; i += 1) {
+      upload[i * 4] = interleavedPositions[i * 2] ?? 0;
+      upload[i * 4 + 1] = interleavedPositions[i * 2 + 1] ?? 0;
+    }
     this.tracers.write(upload.buffer);
   }
 
@@ -244,7 +255,13 @@ export class GpuFieldRegistry {
   }
 
   async readTracers(): Promise<Float32Array> {
-    return new Float32Array(await this.tracers.read());
+    const packed = new Float32Array(await this.tracers.read(this.tracerCount * 16));
+    const positions = new Float32Array(this.tracerCount * 2);
+    for (let i = 0; i < this.tracerCount; i += 1) {
+      positions[i * 2] = packed[i * 4] ?? 0;
+      positions[i * 2 + 1] = packed[i * 4 + 1] ?? 0;
+    }
+    return positions;
   }
 
   async readPressure(): Promise<Float32Array> {

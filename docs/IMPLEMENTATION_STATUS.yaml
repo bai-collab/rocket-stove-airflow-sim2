@@ -59,6 +59,7 @@ implemented:
       - ash
     rendering:
       - temperature / smoke / rawStraw / char packed into renderState for low-limit fragment adapters
+      - tracer position / temperature packed into a storage+vertex instance buffer; vertex shader reads attributes only
     diagnostics:
       - scalar-outflow vec4 reduction scratch (smoke / volatile / exhaust)
       - scalar-mass reduction and normalization scratch
@@ -109,7 +110,7 @@ validation:
   github_actions:
     cpu_physics_invariants: success
     typescript_strict_typecheck: success
-    wgsl_matrix_entries: 23
+    wgsl_matrix_entries: 24
     all_wgsl_validation: success
     portable_software_adapter_install: success
     vgpu_doctor_real_adapter_check: success
@@ -121,7 +122,8 @@ validation:
     vite_production_build: success
     local_cpu_tests_after_hardening: success
     local_gpu_tests_after_hardening: success
-    vgpu_render_storage_limit_compatibility: pending_remote_rerun
+    vgpu_render_storage_limit_compatibility: resolved_in_local
+    vgpu_tracer_vertex_buffer_compatibility: pending_remote_rerun
   gpu_reaction_parity:
     - pyrolysis + volatile combustion + char oxidation against CPU formulas
     - cooling + residence update against CPU operator order

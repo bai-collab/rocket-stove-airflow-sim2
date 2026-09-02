@@ -15,6 +15,10 @@ const packRenderStateShader = await readFile(
   new URL('../src/gpu/shaders/render/pack-render-state.wgsl', import.meta.url),
   'utf8'
 );
+const packTracerRenderStateShader = await readFile(
+  new URL('../src/gpu/shaders/render/pack-tracer-render-state.wgsl', import.meta.url),
+  'utf8'
+);
 const tracerRenderShader = await readFile(
   new URL('../src/gpu/shaders/render/tracer-render.wgsl', import.meta.url),
   'utf8'
@@ -60,14 +64,14 @@ test('VGPU tracer integration uses swept solid collision', async (t) => {
   // fluid cell. This catches endpoint-only collision implementations.
   velocityData[(1 * nx + 1) * 2] = 80;
   const tracerData = new Float32Array([
-    6, 6,
-    23, 18,
-    10, 30,
+    6, 6, 0, 0,
+    23, 18, 0, 0,
+    10, 30, 0, 0,
   ]);
 
   const solid = storage(gpu, count * 4, 'read');
   const velocity = storage(gpu, count * 8, 'read');
-  const tracers = storage(gpu, tracerCount * 8, 'read-write');
+  const tracers = storage(gpu, tracerCount * 16, 'read-write');
   try {
     solid.write(solidData);
     velocity.write(velocityData);
@@ -93,9 +97,9 @@ test('VGPU tracer integration uses swept solid collision', async (t) => {
     pass.dispatch(1);
     const actual = new Float32Array(await tracers.read());
   close(actual, new Float32Array([
-    7, 6,
-    23, 18,
-    11, 30,
+    7, 6, 0, 0,
+    23, 18, 0, 0,
+    11, 30, 0, 0,
   ]));
   } finally {
     solid.destroy();
@@ -135,10 +139,12 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
   rawData[8] = 0.5;
   charData[8] = 0.3;
   ashData[8] = 0.05;
-  const tracerData = new Float32Array([18, 18, 42, 30]);
+  const tracerData = new Float32Array([
+    18, 18, 0, 0,
+    42, 30, 0, 0,
+  ]);
 
   const solid = storage(gpu, count * 4, 'read');
-  const fuelMask = storage(gpu, count * 4, 'read');
   const velocity = storage(gpu, count * 8, 'read');
   const temperature = storage(gpu, count * 4, 'read');
   const smoke = storage(gpu, count * 4, 'read');
@@ -146,7 +152,11 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
   const charMass = storage(gpu, count * 4, 'read');
   const ash = storage(gpu, count * 4, 'read');
   const renderState = storage(gpu, count * 16, 'read-write');
-  const tracers = storage(gpu, tracerCount * 8, 'read');
+  const tracers = gpu.device.createBuffer({
+    size: tracerCount * 16,
+    usage: ['storage', 'vertex', 'copy_dst', 'copy_src'],
+    label: 'test:tracer-render-state',
+  });
   const screen = target(gpu, { size: [width, height], format: 'rgba8unorm' });
 
   try {
@@ -171,6 +181,25 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
     });
     pack.dispatch(1);
 
+    const packTracers = compute(gpu, packTracerRenderStateShader, {
+      label: 'test:pack-tracer-render-state',
+      set: {
+        params: {
+          h,
+          nx,
+          ny,
+          tracer_count: tracerCount,
+          _pad0: 0,
+          _pad1: 0,
+          _pad2: 0,
+          _pad3: 0,
+        },
+        temperature,
+        tracers,
+      },
+    });
+    packTracers.dispatch(1);
+
     const field = effect(gpu, fieldRenderShader, {
       set: {
         params: { h, sim_width: simWidth, sim_height: simHeight, ambient_temperature: 25, nx, ny, _pad0: 0, _pad1: 0 },
@@ -182,12 +211,18 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
     });
     const dots = draw(gpu, {
       shader: tracerRenderShader,
+      geometry: {
+        vertexBuffers: [tracers.gpu],
+        vertexBufferLayouts: [{
+          arrayStride: 16,
+          stepMode: 'instance',
+          attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x4' }],
+        }],
+        vertexCount: 6,
+      },
       instances: tracerCount,
-      vertices: 6,
       set: {
         params: { sim_width: simWidth, sim_height: simHeight, h, radius: 2, nx, ny, tracer_count: tracerCount, _pad0: 0 },
-        tracers,
-        temperature,
       },
     });
 

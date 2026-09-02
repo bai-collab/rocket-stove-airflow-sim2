@@ -35,6 +35,7 @@ jobs:
           - src/gpu/shaders/combustion/secondary-combustion.wgsl
           - src/gpu/shaders/tracer/tracer-update.wgsl
           - src/gpu/shaders/render/pack-render-state.wgsl
+          - src/gpu/shaders/render/pack-tracer-render-state.wgsl
           - src/gpu/shaders/render/field-render.wgsl
           - src/gpu/shaders/render/tracer-render.wgsl
     steps:

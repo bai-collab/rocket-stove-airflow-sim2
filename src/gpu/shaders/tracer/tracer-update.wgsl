@@ -12,7 +12,14 @@ struct TracerParams {
 @group(0) @binding(0) var<uniform> params: TracerParams;
 @group(0) @binding(1) var<storage, read> solid: array<u32>;
 @group(0) @binding(2) var<storage, read> velocity: array<vec2f>;
-@group(0) @binding(3) var<storage, read_write> tracers: array<vec2f>;
+// The same vec4 record is also consumed as an instance vertex attribute by
+// the render pass: xy is position, z is sampled temperature, w is reserved.
+@group(0) @binding(3) var<storage, read_write> tracers: array<vec4f>;
+
+fn write_position(index: u32, position: vec2f) {
+  let current = tracers[index];
+  tracers[index] = vec4f(position, current.z, current.w);
+}
 
 fn in_canvas(p: vec2f) -> bool {
   return p.x >= 0.0 && p.y >= 0.0 && p.x < params.sim_width && p.y < params.sim_height;
@@ -178,7 +185,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     return;
   }
 
-  var p = tracers[i];
+  var p = tracers[i].xy;
   if (is_solid_point(p)) {
     let relocated = find_fluid_point_near(p);
     p = select(respawn(p), relocated, relocated.x >= 0.0);
@@ -187,11 +194,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
   let vel = sample_velocity(p);
   let next = p + vel * params.dt;
   if (!in_canvas(next)) {
-    tracers[i] = respawn(p);
+    write_position(i, respawn(p));
     return;
   }
   if (!segment_hits_solid(p, next)) {
-    tracers[i] = next;
+    write_position(i, next);
     return;
   }
 
@@ -202,5 +209,5 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
   } else if (!segment_hits_solid(p, try_y)) {
     p.y = try_y.y;
   }
-  tracers[i] = p;
+  write_position(i, p);
 }

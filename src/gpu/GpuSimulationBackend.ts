@@ -25,6 +25,7 @@ import pyrolysisPassWgsl from './shaders/fuel/pyrolysis-pass.wgsl';
 import volatileCombustionWgsl from './shaders/fuel/volatile-combustion.wgsl';
 import fieldRenderWgsl from './shaders/render/field-render.wgsl';
 import packRenderStateWgsl from './shaders/render/pack-render-state.wgsl';
+import packTracerRenderStateWgsl from './shaders/render/pack-tracer-render-state.wgsl';
 import tracerRenderWgsl from './shaders/render/tracer-render.wgsl';
 import advectScalarWgsl from './shaders/scalar/advect-scalar.wgsl';
 import openBoundaryExchangeWgsl from './shaders/scalar/open-boundary-exchange.wgsl';
@@ -113,6 +114,7 @@ export class GpuSimulationBackend implements SimulationBackend {
   private secondaryCombustion: Compute | null = null;
   private tracerUpdate: Compute | null = null;
   private packRenderState: Compute | null = null;
+  private packTracerRenderState: Compute | null = null;
   private renderSurface: ReturnType<typeof surface> | null = null;
   private fieldEffect: ReturnType<typeof effect> | null = null;
   private tracerDraw: ReturnType<typeof draw> | null = null;
@@ -177,18 +179,28 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.secondaryCombustion = compute(this.gpu, secondaryCombustionWgsl, { label: 'rocket-stove-airflow:secondary-combustion' });
     this.tracerUpdate = compute(this.gpu, tracerUpdateWgsl, { label: 'rocket-stove-airflow:tracer-update' });
     this.packRenderState = compute(this.gpu, packRenderStateWgsl, { label: 'rocket-stove-airflow:pack-render-state' });
+    this.packTracerRenderState = compute(this.gpu, packTracerRenderStateWgsl, { label: 'rocket-stove-airflow:pack-tracer-render-state' });
     this.initialized = true;
   }
 
   attachRenderCanvas(canvas: HTMLCanvasElement): void {
     const gpu = this.requireGpu();
+    const fields = this.requireFields();
     this.renderSurface = surface(gpu, canvas, { dpr: [1, 2] });
     this.fieldEffect = effect(gpu, fieldRenderWgsl, { label: 'rocket-stove-airflow:field-render' });
     this.tracerDraw = draw(gpu, {
       shader: tracerRenderWgsl,
       label: 'rocket-stove-airflow:tracer-render',
+      geometry: {
+        vertexBuffers: [fields.tracers.gpu],
+        vertexBufferLayouts: [{
+          arrayStride: 16,
+          stepMode: 'instance',
+          attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x4' }],
+        }],
+        vertexCount: 6,
+      },
       instances: this.tracerCount,
-      vertices: 6,
     });
   }
 
@@ -199,6 +211,7 @@ export class GpuSimulationBackend implements SimulationBackend {
 
   uploadTracerState(interleavedPositions: Float32Array): void {
     this.requireFields().uploadTracers(interleavedPositions);
+    this.updateTracerRenderState();
   }
 
   step(dt: number): void {
@@ -259,8 +272,6 @@ export class GpuSimulationBackend implements SimulationBackend {
         tracer_count: this.tracerCount,
         _pad0: 0,
       },
-      tracers: fields.tracers,
-      temperature: fields.temperature.read,
     });
 
     frame(gpu, (f) => {
@@ -346,6 +357,7 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.secondaryCombustion = null;
     this.tracerUpdate = null;
     this.packRenderState = null;
+    this.packTracerRenderState = null;
     this.gpu = null;
     this.initialized = false;
   }
@@ -529,6 +541,27 @@ export class GpuSimulationBackend implements SimulationBackend {
         render_state: fields.renderState,
       })
       .dispatch(Math.ceil(this.cellCount / 64));
+    this.updateTracerRenderState();
+  }
+
+  private updateTracerRenderState(): void {
+    const fields = this.requireFields();
+    this.requirePass(this.packTracerRenderState, 'packTracerRenderState')
+      .set({
+        params: {
+          h: this.h,
+          nx: this.nx,
+          ny: this.ny,
+          tracer_count: this.tracerCount,
+          _pad0: 0,
+          _pad1: 0,
+          _pad2: 0,
+          _pad3: 0,
+        },
+        temperature: fields.temperature.read,
+        tracers: fields.tracers,
+      })
+      .dispatch(Math.ceil(this.tracerCount / 64));
   }
 
   private runTransport(dt: number, includeOpenBoundaryExchange: boolean): void {
