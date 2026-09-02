@@ -11,6 +11,9 @@ export type CpuAirflowSnapshot = {
   volatileGas?: Float32Array;
   exhaustGas?: Float32Array;
   secondaryResidence?: Float32Array;
+  wallTemperature?: Float32Array;
+  wallConductivity?: Float32Array;
+  wallMaterial?: Uint8Array | Uint32Array;
   fuelMask?: Uint8Array | Uint32Array;
   rawStraw?: Float32Array;
   char?: Float32Array;
@@ -20,6 +23,7 @@ export type CpuAirflowSnapshot = {
 
 export type GpuScalarState = {
   temperature: Float32Array;
+  wallTemperature: Float32Array;
   oxygen: Float32Array;
   smoke: Float32Array;
   volatileGas: Float32Array;
@@ -64,6 +68,9 @@ export class GpuFieldRegistry {
   readonly boundaryFlux: PingPong;
 
   readonly temperature: PingPong;
+  readonly wallTemperature: PingPong;
+  readonly wallConductivity: StorageBuffer;
+  readonly wallMaterial: StorageBuffer;
   readonly oxygen: PingPong;
   readonly smoke: PingPong;
   readonly volatileGas: PingPong;
@@ -92,6 +99,9 @@ export class GpuFieldRegistry {
     this.boundaryFlux = pingPongStorage(gpu, cellCount * 8);
 
     this.temperature = pingPongStorage(gpu, cellCount * 4);
+    this.wallTemperature = pingPongStorage(gpu, cellCount * 4);
+    this.wallConductivity = storage(gpu, cellCount * 4, 'read');
+    this.wallMaterial = storage(gpu, cellCount * 4, 'read');
     this.oxygen = pingPongStorage(gpu, cellCount * 4);
     this.smoke = pingPongStorage(gpu, cellCount * 4);
     this.volatileGas = pingPongStorage(gpu, cellCount * 4);
@@ -124,6 +134,9 @@ export class GpuFieldRegistry {
     this.assertOptionalLength(snapshot.volatileGas, 'volatileGas');
     this.assertOptionalLength(snapshot.exhaustGas, 'exhaustGas');
     this.assertOptionalLength(snapshot.secondaryResidence, 'secondaryResidence');
+    this.assertOptionalLength(snapshot.wallTemperature, 'wallTemperature');
+    this.assertOptionalLength(snapshot.wallConductivity, 'wallConductivity');
+    this.assertOptionalLength(snapshot.wallMaterial, 'wallMaterial');
     this.assertOptionalLength(snapshot.fuelMask, 'fuelMask');
     this.assertOptionalLength(snapshot.rawStraw, 'rawStraw');
     this.assertOptionalLength(snapshot.char, 'char');
@@ -134,6 +147,8 @@ export class GpuFieldRegistry {
     solid32.set(snapshot.solid);
     const fuelMask32 = new Uint32Array(this.cellCount);
     if (snapshot.fuelMask) fuelMask32.set(snapshot.fuelMask);
+    const wallMaterial32 = new Uint32Array(this.cellCount);
+    if (snapshot.wallMaterial) wallMaterial32.set(snapshot.wallMaterial);
     const velocity = new Float32Array(this.cellCount * 2);
     for (let i = 0; i < this.cellCount; i += 1) {
       velocity[i * 2] = snapshot.u[i] ?? 0;
@@ -142,10 +157,13 @@ export class GpuFieldRegistry {
 
     this.solid.write(solid32.buffer);
     this.fuelMask.write(fuelMask32.buffer);
+    this.wallMaterial.write(wallMaterial32.buffer);
+    this.writeStorage(this.wallConductivity, snapshot.wallConductivity, 0);
     this.velocity.read.write(velocity.buffer);
     this.velocity.write.write(velocity.buffer);
 
     this.writeScalarPair(this.temperature, snapshot.temperature, DEFAULT_FUEL_PARAMS.ambientTemperature);
+    this.writeScalarPair(this.wallTemperature, snapshot.wallTemperature, DEFAULT_FUEL_PARAMS.ambientTemperature);
     this.writeScalarPair(this.oxygen, snapshot.oxygen, 1);
     this.writeScalarPair(this.smoke, snapshot.smoke, 0);
     this.writeScalarPair(this.volatileGas, snapshot.volatileGas, 0);
@@ -221,8 +239,9 @@ export class GpuFieldRegistry {
   }
 
   async readScalarState(): Promise<GpuScalarState> {
-    const [temperature, oxygen, smoke, volatileGas, exhaustGas, secondaryResidence] = await Promise.all([
+    const [temperature, wallTemperature, oxygen, smoke, volatileGas, exhaustGas, secondaryResidence] = await Promise.all([
       this.temperature.read.read(),
+      this.wallTemperature.read.read(),
       this.oxygen.read.read(),
       this.smoke.read.read(),
       this.volatileGas.read.read(),
@@ -231,6 +250,7 @@ export class GpuFieldRegistry {
     ]);
     return {
       temperature: new Float32Array(temperature),
+      wallTemperature: new Float32Array(wallTemperature),
       oxygen: new Float32Array(oxygen),
       smoke: new Float32Array(smoke),
       volatileGas: new Float32Array(volatileGas),
@@ -305,6 +325,9 @@ export class GpuFieldRegistry {
     destroyStorage(this.divergence);
     this.destroyPair(this.boundaryFlux);
     this.destroyPair(this.temperature);
+    this.destroyPair(this.wallTemperature);
+    destroyStorage(this.wallConductivity);
+    destroyStorage(this.wallMaterial);
     this.destroyPair(this.oxygen);
     this.destroyPair(this.smoke);
     this.destroyPair(this.volatileGas);

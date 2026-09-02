@@ -20,6 +20,7 @@ import reduceVec2Wgsl from './shaders/airflow/reduce-vec2.wgsl';
 import reduceVec4Wgsl from './shaders/airflow/reduce-vec4.wgsl';
 import coolingResidenceWgsl from './shaders/combustion/cooling-residence.wgsl';
 import secondaryCombustionWgsl from './shaders/combustion/secondary-combustion.wgsl';
+import wallConductionWgsl from './shaders/combustion/wall-conduction.wgsl';
 import charOxidationPassWgsl from './shaders/fuel/char-oxidation-pass.wgsl';
 import pyrolysisPassWgsl from './shaders/fuel/pyrolysis-pass.wgsl';
 import volatileCombustionWgsl from './shaders/fuel/volatile-combustion.wgsl';
@@ -33,6 +34,7 @@ import normalizeScalarWgsl from './shaders/scalar/normalize-scalar.wgsl';
 import scalarMassStatsWgsl from './shaders/scalar/scalar-mass-stats.wgsl';
 import tracerUpdateWgsl from './shaders/tracer/tracer-update.wgsl';
 import { DEFAULT_FUEL_PARAMS } from '../physics/fuel-model.mjs';
+import { WALL_CONDUCTION_PARAMS } from '../physics/wall-materials.mjs';
 import {
   GpuFieldRegistry,
   type CpuAirflowSnapshot,
@@ -111,6 +113,7 @@ export class GpuSimulationBackend implements SimulationBackend {
   private volatileCombustion: Compute | null = null;
   private charOxidationPass: Compute | null = null;
   private coolingResidence: Compute | null = null;
+  private wallConduction: Compute | null = null;
   private secondaryCombustion: Compute | null = null;
   private tracerUpdate: Compute | null = null;
   private packRenderState: Compute | null = null;
@@ -176,6 +179,7 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.volatileCombustion = compute(this.gpu, volatileCombustionWgsl, { label: 'rocket-stove-airflow:volatile-combustion' });
     this.charOxidationPass = compute(this.gpu, charOxidationPassWgsl, { label: 'rocket-stove-airflow:char-oxidation' });
     this.coolingResidence = compute(this.gpu, coolingResidenceWgsl, { label: 'rocket-stove-airflow:cooling-residence' });
+    this.wallConduction = compute(this.gpu, wallConductionWgsl, { label: 'rocket-stove-airflow:wall-conduction' });
     this.secondaryCombustion = compute(this.gpu, secondaryCombustionWgsl, { label: 'rocket-stove-airflow:secondary-combustion' });
     this.tracerUpdate = compute(this.gpu, tracerUpdateWgsl, { label: 'rocket-stove-airflow:tracer-update' });
     this.packRenderState = compute(this.gpu, packRenderStateWgsl, { label: 'rocket-stove-airflow:pack-render-state' });
@@ -216,6 +220,7 @@ export class GpuSimulationBackend implements SimulationBackend {
 
   step(dt: number): void {
     this.runTransport(dt, true);
+    this.runWallConduction(dt);
     this.updateRenderState();
   }
 
@@ -229,6 +234,7 @@ export class GpuSimulationBackend implements SimulationBackend {
     const workgroups = Math.ceil(this.cellCount / 64);
     this.runFuelTransformation(dt, Boolean(options.ignitionActive), workgroups);
     this.runTransport(dt, false);
+    this.runWallConduction(dt);
     this.runCoolingResidence(dt, workgroups);
     this.runSecondaryCombustion(dt, workgroups);
     this.exchangeOpenBoundaryScalars(dt, workgroups);
@@ -259,6 +265,7 @@ export class GpuSimulationBackend implements SimulationBackend {
       velocity: fields.velocity.read,
       render_state: fields.renderState,
       ash: fields.ash,
+      wall_material: fields.wallMaterial,
     });
 
     tracerDraw.set({
@@ -354,6 +361,7 @@ export class GpuSimulationBackend implements SimulationBackend {
     this.volatileCombustion = null;
     this.charOxidationPass = null;
     this.coolingResidence = null;
+    this.wallConduction = null;
     this.secondaryCombustion = null;
     this.tracerUpdate = null;
     this.packRenderState = null;
@@ -438,6 +446,33 @@ export class GpuSimulationBackend implements SimulationBackend {
         ash: fields.ash,
       })
       .dispatch(workgroups);
+  }
+
+  private runWallConduction(dt: number): void {
+    const fields = this.requireFields();
+    const workgroups = Math.ceil(this.cellCount / 64);
+    this.requirePass(this.wallConduction, 'wallConduction')
+      .set({
+        params: {
+          dt,
+          ambient_temperature: FUEL.ambientTemperature,
+          max_temperature: FUEL.maxTemperature,
+          coupling_rate: WALL_CONDUCTION_PARAMS.couplingRate,
+          wall_heat_capacity: WALL_CONDUCTION_PARAMS.wallHeatCapacity,
+          reference_conductivity: WALL_CONDUCTION_PARAMS.referenceConductivity,
+          nx: this.nx,
+          ny: this.ny,
+        },
+        solid: fields.solid,
+        wall_conductivity: fields.wallConductivity,
+        temperature_src: fields.temperature.read,
+        temperature_dst: fields.temperature.write,
+        wall_temperature_src: fields.wallTemperature.read,
+        wall_temperature_dst: fields.wallTemperature.write,
+      })
+      .dispatch(workgroups);
+    fields.temperature.swap();
+    fields.wallTemperature.swap();
   }
 
   private runCoolingResidence(dt: number, workgroups: number): void {

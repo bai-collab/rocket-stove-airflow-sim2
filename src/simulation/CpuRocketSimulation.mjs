@@ -6,6 +6,12 @@ import {
   stepPrimaryFuelModel,
   stepSecondarySmokeOxidation,
 } from '../physics/fuel-model.mjs';
+import {
+  DEFAULT_WALL_MATERIAL_ID,
+  WALL_CONDUCTION_PARAMS,
+  getWallMaterial,
+  normalizeWallMaterialId,
+} from '../physics/wall-materials.mjs';
 
 export const SIM_WIDTH = 900;
 export const SIM_HEIGHT = 560;
@@ -70,6 +76,10 @@ export class CpuRocketSimulation {
     this.char = new Float32Array(N);
     this.mineralMatter = new Float32Array(N);
     this.ash = new Float32Array(N);
+    this.wallTemperature = new Float32Array(N);
+    this.wallTemperaturePrev = new Float32Array(N);
+    this.wallConductivity = new Float32Array(N);
+    this.wallMaterial = new Uint8Array(N);
     this.solid = new Uint8Array(N);
     this.fuelMask = new Uint8Array(N);
     this.fuelInitialOrganic = new Float32Array(N);
@@ -115,6 +125,8 @@ export class CpuRocketSimulation {
     this.exhaustGas.fill(0); this.exhaustPrev.fill(0);
     this.secondaryResidence.fill(0); this.secondaryResidencePrev.fill(0);
     this.rawStraw.fill(0); this.char.fill(0); this.mineralMatter.fill(0); this.ash.fill(0);
+    this.wallTemperature.fill(AMBIENT_T); this.wallTemperaturePrev.fill(AMBIENT_T);
+    this.wallConductivity.fill(0); this.wallMaterial.fill(0);
     this.solid.fill(0); this.fuelMask.fill(0);
     this.fuelInitialOrganic.fill(0); this.fuelInitialMineral.fill(0);
     this.time = 0;
@@ -150,7 +162,10 @@ export class CpuRocketSimulation {
   loadPreset(id) {
     const preset = STOVE_PRESETS[id];
     if (!preset) return false;
-    this.walls = preset.walls.map((p) => ({ ...p }));
+    this.walls = preset.walls.map((p) => ({
+      ...p,
+      materialId: normalizeWallMaterialId(p.materialId ?? DEFAULT_WALL_MATERIAL_ID),
+    }));
     this.fuels = preset.fuels.map((p) => ({ ...p }));
     this.resetFields();
     this.rebuildGeometry(true);
@@ -169,14 +184,18 @@ export class CpuRocketSimulation {
     this.running = !this.running;
   }
 
-  setToolAt(tool, px, py) {
+  setToolAt(tool, px, py, wallMaterialId = DEFAULT_WALL_MATERIAL_ID) {
     const x = snap(px);
     const y = snap(py);
     if (x < 0 || y < 0 || x >= SIM_WIDTH || y >= SIM_HEIGHT) return;
     const same = (p) => p.x === x && p.y === y;
 
     if (tool === 'wall') {
-      if (!this.walls.some(same) && !this.fuels.some(same)) this.walls.push({ x, y });
+      if (this.fuels.some(same)) return;
+      const materialId = normalizeWallMaterialId(wallMaterialId);
+      const existing = this.walls.find(same);
+      if (existing) existing.materialId = materialId;
+      else this.walls.push({ x, y, materialId });
     } else if (tool === 'fuel') {
       if (!this.fuels.some(same) && !this.walls.some(same)) this.fuels.push({ x, y });
     } else if (tool === 'erase') {
@@ -199,8 +218,11 @@ export class CpuRocketSimulation {
 
     this.solid.fill(0);
     this.fuelMask.fill(0);
+    this.wallMaterial.fill(0);
+    this.wallConductivity.fill(0);
 
     for (const wall of this.walls) {
+      const material = getWallMaterial(wall.materialId);
       const x0 = Math.floor(wall.x / H);
       const y0 = Math.floor(wall.y / H);
       const x1 = Math.min(NX, Math.ceil((wall.x + BUILD_CELL) / H));
@@ -209,6 +231,8 @@ export class CpuRocketSimulation {
         for (let gx = x0; gx < x1; gx += 1) {
           const i = idx(gx, gy);
           this.solid[i] = 1;
+          this.wallMaterial[i] = material.numericId;
+          this.wallConductivity[i] = material.conductivity;
         }
       }
     }
@@ -220,6 +244,8 @@ export class CpuRocketSimulation {
       this.temperaturePrev[i] = AMBIENT_T;
       this.oxygen[i] = solid ? 0 : AMBIENT_O2;
       this.oxygenPrev[i] = solid ? 0 : AMBIENT_O2;
+      this.wallTemperature[i] = AMBIENT_T;
+      this.wallTemperaturePrev[i] = AMBIENT_T;
       this.smoke[i] = 0; this.smokePrev[i] = 0;
       this.volatileGas[i] = 0; this.volatilePrev[i] = 0;
       this.exhaustGas[i] = 0; this.exhaustPrev[i] = 0;
@@ -299,6 +325,7 @@ export class CpuRocketSimulation {
     this.advectField(this.exhaustGas, this.exhaustPrev, this.u, this.v, dt, 0, true, true);
     this.advectField(this.secondaryResidence, this.secondaryResidencePrev, this.u, this.v, dt, 0, true);
 
+    this.applyWallConduction(dt);
     this.coolAndMix(dt);
     this.updateSecondaryResidence(dt);
     this.applySecondaryCombustion(dt);
@@ -417,6 +444,75 @@ export class CpuRocketSimulation {
     const correction = sourceTotal / destinationTotal;
     for (let i = 0; i < N; i += 1) {
       if (!this.solid[i]) dst[i] = Math.max(0, dst[i] * correction);
+    }
+  }
+
+  applyWallConduction(dt) {
+    if (!(dt > 0)) return;
+
+    this.temperaturePrev.set(this.temperature);
+    this.wallTemperaturePrev.set(this.wallTemperature);
+
+    const {
+      referenceConductivity,
+      couplingRate,
+      wallHeatCapacity,
+    } = WALL_CONDUCTION_PARAMS;
+    const interfaceRate = (conductivity) => clamp(
+      Math.max(0, conductivity) / Math.max(referenceConductivity, 1e-6) * couplingRate * dt,
+      0,
+      0.24,
+    );
+    const harmonicConductivity = (a, b) => {
+      if (a <= 0 || b <= 0) return 0;
+      return (2 * a * b) / (a + b);
+    };
+
+    const contribution = (x, y, currentTemperature, currentSolid, currentConductivity) => {
+      if (x < 0 || y < 0 || x >= NX || y >= NY) {
+        if (!currentSolid) return 0;
+        return (AMBIENT_T - currentTemperature) * interfaceRate(currentConductivity) / wallHeatCapacity;
+      }
+
+      const neighbour = idx(x, y);
+      const neighbourSolid = this.solid[neighbour] === 1;
+      if (!currentSolid && !neighbourSolid) return 0;
+
+      const neighbourTemperature = neighbourSolid
+        ? this.wallTemperaturePrev[neighbour]
+        : this.temperaturePrev[neighbour];
+      const conductivity = currentSolid && neighbourSolid
+        ? harmonicConductivity(currentConductivity, this.wallConductivity[neighbour])
+        : neighbourSolid
+          ? this.wallConductivity[neighbour]
+          : currentConductivity;
+      const response = interfaceRate(conductivity);
+      const capacity = currentSolid ? wallHeatCapacity : 1;
+      return (neighbourTemperature - currentTemperature) * response / capacity;
+    };
+
+    for (let y = 0; y < NY; y += 1) {
+      for (let x = 0; x < NX; x += 1) {
+        const i = idx(x, y);
+        const currentSolid = this.solid[i] === 1;
+        const currentTemperature = currentSolid
+          ? this.wallTemperaturePrev[i]
+          : this.temperaturePrev[i];
+        const currentConductivity = currentSolid ? this.wallConductivity[i] : 0;
+        const delta =
+          contribution(x - 1, y, currentTemperature, currentSolid, currentConductivity) +
+          contribution(x + 1, y, currentTemperature, currentSolid, currentConductivity) +
+          contribution(x, y - 1, currentTemperature, currentSolid, currentConductivity) +
+          contribution(x, y + 1, currentTemperature, currentSolid, currentConductivity);
+        const nextTemperature = clamp(
+          currentTemperature + delta,
+          AMBIENT_T,
+          MAX_T,
+        );
+
+        if (currentSolid) this.wallTemperature[i] = nextTemperature;
+        else this.temperature[i] = nextTemperature;
+      }
     }
   }
 
@@ -856,8 +952,15 @@ export class CpuRocketSimulation {
     let fuelO2 = 0;
     let fuelTemperature = 0;
     let fuelCells = 0;
+    let wallTemperature = 0;
+    let wallConductivity = 0;
+    let wallCells = 0;
     for (let i = 0; i < N; i += 1) {
-      if (!this.solid[i]) {
+      if (this.solid[i]) {
+        wallTemperature += this.wallTemperature[i];
+        wallConductivity += this.wallConductivity[i];
+        wallCells += 1;
+      } else {
         speed += Math.hypot(this.u[i], this.v[i]);
         fluidCells += 1;
       }
@@ -914,6 +1017,8 @@ export class CpuRocketSimulation {
       fuelPhase,
       reactiveFuel: raw + char + volatile,
       averageTemperature: this.average(this.temperature),
+      wallTemperature: wallCells ? wallTemperature / wallCells : AMBIENT_T,
+      averageWallConductivity: wallCells ? wallConductivity / wallCells : 0,
       smokeOut: this.smokeOutTotal,
       volatileOut: this.volatileOutTotal,
       exhaustOut: this.exhaustOutTotal,

@@ -15,6 +15,11 @@ import {
 } from './simulation/BrowserSimulationController';
 import { BUILD_CELL, STOVE_PRESETS } from './simulation/presets.mjs';
 import { getFuelPhase } from './physics/fuel-model.mjs';
+import {
+  DEFAULT_WALL_MATERIAL_ID,
+  WALL_MATERIAL_OPTIONS,
+  getWallMaterial,
+} from './physics/wall-materials.mjs';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -38,7 +43,13 @@ app.innerHTML = `
           <button class="tool" data-tool="fuel">稻稈燃料</button>
           <button class="tool" data-tool="erase">橡皮擦</button>
         </div>
-        <p class="hint">爐壁留下的開口就是自然進排氣通道。藍色粒子只是氣流示蹤，不是氧氣分子。</p>
+        <p class="hint">選好磚塊導熱係數後，用「磚塊／爐壁」點畫布；再點既有磚塊可改變材料。藍色粒子只是氣流示蹤，不是氧氣分子。</p>
+
+        <div class="wall-material-control">
+          <label for="wall-material-select">磚塊導熱係數</label>
+          <select id="wall-material-select"></select>
+          <p id="wall-material-detail" class="wall-material-detail"></p>
+        </div>
 
         <h2>2. 測試</h2>
         <div class="action-stack">
@@ -66,7 +77,8 @@ app.innerHTML = `
           <span><i class="dot heat"></i>橘：高溫區</span>
           <span><i class="dot smoke"></i>黑灰：相對黑煙</span>
           <span><i class="box fuel"></i>金黃→深灰：稻稈→炭；火焰＝燃燒中</span>
-          <span><i class="box wall"></i>紅褐：磚牆</span>
+          <span>磚牆顏色依導熱係數：</span>
+          <div id="wall-material-legend" class="wall-material-legend"></div>
         </div>
       </aside>
 
@@ -80,7 +92,7 @@ app.innerHTML = `
           <div id="preset-grid" class="preset-grid"></div>
           <p id="preset-description" class="hint"></p>
         </div>
-        <p class="model-note">Physics v3：稻稈是有限燃料。受熱後先熱裂解成揮發性氣體與炭；黑煙只有在高溫、含氧、充分混合並具有停留時間時才可進一步氧化。灰分來自燃料原有礦物質留下，不代表「碳變成灰」。Phase 5 的 GPU 模式已把燃料反應、氣流、標量傳輸、tracer 更新及溫度／黑煙／速度場呈現留在 VGPU/WebGPU；CPU 完整場只約每 6 個 physics tick 回讀一次，供診斷與故障 checkpoint 使用。</p>
+        <p class="model-note">Physics v3：稻稈是有限燃料。受熱後先熱裂解成揮發性氣體與炭；黑煙只有在高溫、含氧、充分混合並具有停留時間時才可進一步氧化。灰分來自燃料原有礦物質留下，不代表「碳變成灰」。磚牆會依所選導熱係數 k 傳熱：低導熱較保溫，高導熱較快把熱帶往外側；這是用來比較爐體設計的教學模擬參數。Phase 5 的 GPU 模式已把燃料反應、氣流、標量傳輸、tracer 更新及溫度／黑煙／速度場呈現留在 VGPU/WebGPU；CPU 完整場只約每 6 個 physics tick 回讀一次，供診斷與故障 checkpoint 使用。</p>
       </section>
 
       <aside class="panel metrics-panel">
@@ -121,6 +133,9 @@ const resetButton = document.querySelector<HTMLButtonElement>('#reset')!;
 const clearButton = document.querySelector<HTMLButtonElement>('#clear')!;
 const speedInput = document.querySelector<HTMLInputElement>('#speed')!;
 const speedValue = document.querySelector<HTMLOutputElement>('#speed-value')!;
+const wallMaterialSelect = document.querySelector<HTMLSelectElement>('#wall-material-select')!;
+const wallMaterialDetail = document.querySelector<HTMLParagraphElement>('#wall-material-detail')!;
+const wallMaterialLegend = document.querySelector<HTMLDivElement>('#wall-material-legend')!;
 const backendSelect = document.querySelector<HTMLSelectElement>('#backend-select')!;
 const backendStatus = document.querySelector<HTMLDivElement>('#backend-status')!;
 const backendDetail = document.querySelector<HTMLParagraphElement>('#backend-detail')!;
@@ -130,6 +145,7 @@ controller.attachGpuCanvas(gpuCanvas);
 const sim = controller.cpu;
 let selectedTool = 'wall';
 let selectedPreset = 'straight';
+let selectedWallMaterialId = DEFAULT_WALL_MATERIAL_ID;
 let drawing = false;
 let lastFrame = performance.now();
 let accumulator = 0;
@@ -190,6 +206,18 @@ function mixRgb(a: readonly number[], b: readonly number[], amount: number) {
 
 function rgbCss(color: readonly number[]) {
   return `rgb(${color[0]} ${color[1]} ${color[2]})`;
+}
+
+function renderWallMaterialControl() {
+  const material = getWallMaterial(selectedWallMaterialId);
+  wallMaterialSelect.innerHTML = WALL_MATERIAL_OPTIONS
+    .map((option) => `<option value="${option.id}">${option.label} · k=${option.conductivity.toFixed(2)}</option>`)
+    .join('');
+  wallMaterialSelect.value = material.id;
+  wallMaterialDetail.textContent = `k = ${material.conductivity.toFixed(2)} W/(m·K)；${material.description}`;
+  wallMaterialLegend.innerHTML = WALL_MATERIAL_OPTIONS
+    .map((option) => `<span><i class="box wall-material-swatch" style="background:${option.color};border-color:${option.stroke}"></i>${option.label}（k=${option.conductivity.toFixed(2)}）</span>`)
+    .join('');
 }
 
 function asFuelPhase(value: unknown): FuelPhase {
@@ -349,6 +377,8 @@ function renderMetrics() {
     metric('剩餘稻稈', d.rawStraw.toFixed(3)),
     metric('剩餘炭', d.char.toFixed(3)),
     metric('灰分顯現', d.ash.toFixed(3)),
+    metric('磚牆平均溫度', `${d.wallTemperature.toFixed(0)} °C`),
+    metric('平均磚牆導熱係數', `k=${d.averageWallConductivity.toFixed(2)}`),
   ].join('');
 
   advanced.innerHTML = [
@@ -436,9 +466,10 @@ function drawCpuField() {
   }
 
   for (const wall of sim.walls) {
-    ctx.fillStyle = '#a65f47';
+    const material = getWallMaterial(wall.materialId);
+    ctx.fillStyle = material.color;
     ctx.fillRect(wall.x + 1, wall.y + 1, BUILD_CELL - 2, BUILD_CELL - 2);
-    ctx.strokeStyle = '#713f2f';
+    ctx.strokeStyle = material.stroke;
     ctx.strokeRect(wall.x + 1.5, wall.y + 1.5, BUILD_CELL - 3, BUILD_CELL - 3);
   }
 
@@ -456,7 +487,8 @@ function drawGpuOverlay() {
   drawGrid();
   ctx.lineWidth = 1;
   for (const wall of sim.walls) {
-    ctx.strokeStyle = 'rgba(113, 63, 47, 0.78)';
+    const material = getWallMaterial(wall.materialId);
+    ctx.strokeStyle = material.stroke;
     ctx.strokeRect(wall.x + 1.5, wall.y + 1.5, BUILD_CELL - 3, BUILD_CELL - 3);
   }
   for (const fuel of sim.fuels) {
@@ -486,7 +518,7 @@ function queueTool(event: PointerEvent) {
   const p = canvasPoint(event);
   editQueue = editQueue
     .then(async () => {
-      await controller.setToolAt(selectedTool, p.x, p.y);
+      await controller.setToolAt(selectedTool, p.x, p.y, selectedWallMaterialId);
       drawPresentation();
       renderMetrics();
     })
@@ -514,6 +546,12 @@ document.querySelector('#tool-grid')!.addEventListener('click', (event) => {
     item.classList.toggle('active', item === button);
   });
 });
+
+wallMaterialSelect.addEventListener('change', () => {
+  selectedWallMaterialId = getWallMaterial(wallMaterialSelect.value).id;
+  renderWallMaterialControl();
+});
+renderWallMaterialControl();
 
 presetGrid.innerHTML = Object.entries(STOVE_PRESETS)
   .map(([id, preset]) => `<button data-preset="${id}"><strong>${preset.label}</strong><small>${preset.description}</small></button>`)

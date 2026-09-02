@@ -37,6 +37,10 @@ h2 { font-size: 17px; margin-bottom: 12px; }
 .backend-control select { width: 100%; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 9px; background: white; color: #334155; }
 .backend-control select:disabled { opacity: .65; cursor: progress; }
 .backend-detail { margin: 7px 0 0; color: #64748b; font-size: 11px; line-height: 1.45; }
+.wall-material-control { margin-bottom: 16px; padding: 10px; border: 1px solid #e8d6c8; border-radius: 10px; background: #fffaf7; }
+.wall-material-control label { display: block; margin-bottom: 6px; color: #713f2f; font-size: 12px; font-weight: 750; }
+.wall-material-control select { width: 100%; border: 1px solid #cda895; border-radius: 8px; padding: 8px 9px; background: white; color: #4a2a22; }
+.wall-material-detail { margin: 7px 0 0; color: #7c574a; font-size: 11px; line-height: 1.45; }
 .range-label { display: flex; justify-content: space-between; gap: 10px; color: #475569; font-size: 13px; font-weight: 650; }
 #speed { width: 100%; margin: 6px 0 16px; }
 .legend { display: grid; gap: 7px; color: #475569; font-size: 12px; }
@@ -48,6 +52,9 @@ h2 { font-size: 17px; margin-bottom: 12px; }
 .box { border-radius: 2px; }
 .box.wall { background: #a65f47; }
 .box.fuel { background: #e8be42; }
+.wall-material-legend { display: grid; gap: 5px; padding-left: 17px; }
+.wall-material-legend span { display: flex; align-items: center; gap: 7px; }
+.wall-material-swatch { border: 1px solid transparent; }
 .fuel-status { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; padding: 11px 12px; border: 1px solid #e8d08a; border-radius: 10px; background: #fffaf0; color: #713f12; }
 .fuel-status-dot { flex: 0 0 auto; width: 11px; height: 11px; margin-top: 3px; border-radius: 50%; background: #e8be42; box-shadow: 0 0 0 3px rgba(232,190,66,.2); }
 .fuel-status strong, .fuel-status small { display: block; }

@@ -7,6 +7,7 @@ import {
   NX,
   NY,
 } from '../src/simulation/CpuRocketSimulation.mjs';
+import { getWallMaterial } from '../src/physics/wall-materials.mjs';
 
 function run(sim, steps) {
   for (let i = 0; i < steps; i += 1) sim.step(DT);
@@ -86,6 +87,37 @@ test('CPU tracers use swept collision instead of endpoint-only collision', () =>
   assert.equal(sim.isSolidPoint(30, 6), true);
   assert.equal(sim.isSolidPoint(60, 6), false);
   assert.equal(sim.segmentHitsSolid(0, 6, 60, 6), true);
+});
+
+test('wall material selection stores distinct conductivity and color metadata', () => {
+  const sim = new CpuRocketSimulation();
+  sim.clearScene();
+  sim.setToolAt('wall', 24, 0, 'insulating');
+
+  assert.equal(sim.walls[0].materialId, 'insulating');
+  assert.equal(sim.wallMaterial[2], getWallMaterial('insulating').numericId);
+  assert.equal(sim.wallConductivity[2], getWallMaterial('insulating').conductivity);
+
+  sim.setToolAt('wall', 24, 0, 'conductive');
+  assert.equal(sim.walls[0].materialId, 'conductive');
+  assert.equal(sim.wallMaterial[2], getWallMaterial('conductive').numericId);
+  assert.ok(Math.abs(sim.wallConductivity[2] - getWallMaterial('conductive').conductivity) < 1e-6);
+});
+
+test('higher wall conductivity transfers more heat during one conduction step', () => {
+  const run = (materialId) => {
+    const sim = new CpuRocketSimulation();
+    sim.clearScene();
+    sim.setToolAt('wall', 24, 0, materialId);
+    sim.temperature[1] = 500;
+    sim.applyWallConduction(DT);
+    return { fluidTemperature: sim.temperature[1], wallTemperature: sim.wallTemperature[2] };
+  };
+
+  const low = run('insulating');
+  const high = run('conductive');
+  assert.ok(high.wallTemperature > low.wallTemperature);
+  assert.ok(high.fluidTemperature < low.fluidTemperature);
 });
 
 test('sealed stove does not keep fuel-zone oxygen at ambient after combustion starts', () => {

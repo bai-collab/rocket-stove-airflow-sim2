@@ -238,13 +238,13 @@ export class BrowserSimulationController {
     });
   }
 
-  async setToolAt(tool: string, x: number, y: number): Promise<void> {
+  async setToolAt(tool: string, x: number, y: number, wallMaterialId?: string): Promise<void> {
     return this.enqueueMutation(async () => {
       await this.waitForIdle();
       if (this.effective === 'gpu' && this.gpu && this.gpuTicksSinceCheckpoint > 0) {
         await this.syncPresentationCheckpoint(true);
       }
-      this.cpu.setToolAt(tool, x, y);
+      this.cpu.setToolAt(tool, x, y, wallMaterialId);
       this.gpuStateDirty = true;
       this.gpuTracersDirty = true;
       this.gpuTicksSinceCheckpoint = 0;
@@ -357,6 +357,7 @@ export class BrowserSimulationController {
     this.cpu.u.set(velocity.u);
     this.cpu.v.set(velocity.v);
     this.cpu.temperature.set(scalars.temperature);
+    this.cpu.wallTemperature.set(scalars.wallTemperature);
     this.cpu.oxygen.set(scalars.oxygen);
     this.cpu.smoke.set(scalars.smoke);
     this.cpu.volatileGas.set(scalars.volatileGas);
@@ -398,6 +399,9 @@ export class BrowserSimulationController {
     if (!gpu) throw new Error('GPU backend is not initialized');
     gpu.uploadAirflowState({
       temperature: this.cpu.temperature,
+      wallTemperature: this.cpu.wallTemperature,
+      wallConductivity: this.cpu.wallConductivity,
+      wallMaterial: this.cpu.wallMaterial,
       solid: this.cpu.solid,
       u: this.cpu.u,
       v: this.cpu.v,

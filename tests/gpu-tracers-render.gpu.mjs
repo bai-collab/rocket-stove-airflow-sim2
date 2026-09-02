@@ -125,6 +125,8 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
 
   const solidData = new Uint32Array(count);
   solidData[1] = 1;
+  const wallMaterialData = new Uint32Array(count);
+  wallMaterialData[1] = 2;
   const velocityData = new Float32Array(count * 2);
   velocityData[5 * 2] = 35;
   velocityData[5 * 2 + 1] = -12;
@@ -145,6 +147,7 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
   ]);
 
   const solid = storage(gpu, count * 4, 'read');
+  const wallMaterial = storage(gpu, count * 4, 'read');
   const velocity = storage(gpu, count * 8, 'read');
   const temperature = storage(gpu, count * 4, 'read');
   const smoke = storage(gpu, count * 4, 'read');
@@ -161,6 +164,7 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
 
   try {
     solid.write(solidData);
+    wallMaterial.write(wallMaterialData);
     velocity.write(velocityData);
     temperature.write(temperatureData);
     smoke.write(smokeData);
@@ -207,6 +211,7 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
         velocity,
         render_state: renderState,
         ash,
+        wall_material: wallMaterial,
       },
     });
     const dots = draw(gpu, {
@@ -270,6 +275,7 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
     assert.ok(changed > 20, `expected tracer draw to change pixels, got ${changed}`);
   } finally {
     solid.destroy();
+    wallMaterial.destroy();
     velocity.destroy();
     temperature.destroy();
     smoke.destroy();

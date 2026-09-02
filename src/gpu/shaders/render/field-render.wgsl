@@ -14,6 +14,7 @@ struct RenderParams {
 @group(0) @binding(2) var<storage, read> velocity: array<vec2f>;
 @group(0) @binding(3) var<storage, read> render_state: array<vec4f>;
 @group(0) @binding(4) var<storage, read> ash: array<f32>;
+@group(0) @binding(5) var<storage, read> wall_material: array<u32>;
 
 fn cell_index(px: vec2f) -> u32 {
   let gx = min(params.nx - 1u, u32(floor(clamp(px.x, 0.0, params.sim_width - 1e-3) / params.h)));
@@ -56,6 +57,12 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
   let i = cell_index(px);
 
   if (solid[i] != 0u) {
+    if (wall_material[i] == 1u) {
+      return vec4f(0.894, 0.604, 0.420, 1.0);
+    }
+    if (wall_material[i] == 3u) {
+      return vec4f(0.435, 0.259, 0.216, 1.0);
+    }
     return vec4f(0.651, 0.373, 0.278, 1.0);
   }
 
