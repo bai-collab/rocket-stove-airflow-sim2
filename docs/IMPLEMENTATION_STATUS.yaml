@@ -11,7 +11,7 @@ status:
   live_browser_backend: auto_cpu_or_gpu_physics_v3
   gpu_backend_authority: reaction_and_transport_parity_verified_with_local_hardening
   cpu_backend_authority: physics_v3_reference_oracle_and_fallback
-  ci: pending_after_local_fixes
+  ci: github_actions_run_96_success
 
 implemented:
   cpu_reference:
@@ -122,8 +122,9 @@ validation:
     vite_production_build: success
     local_cpu_tests_after_hardening: success
     local_gpu_tests_after_hardening: success
-    vgpu_render_storage_limit_compatibility: resolved_in_local
-    vgpu_tracer_vertex_buffer_compatibility: pending_remote_rerun
+    vgpu_render_storage_limit_compatibility: success
+    vgpu_tracer_vertex_buffer_compatibility: success
+    github_pages_deployment: success
   gpu_reaction_parity:
     - pyrolysis + volatile combustion + char oxidation against CPU formulas
     - cooling + residence update against CPU operator order
