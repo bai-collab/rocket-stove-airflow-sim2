@@ -49,6 +49,7 @@ h2 { font-size: 17px; margin-bottom: 12px; }
 .dot.air { background: #2563eb; }
 .dot.heat { background: #f97316; }
 .dot.smoke { background: #374151; }
+.dot.wall-heat { background: #ff3809; }
 .box { border-radius: 2px; }
 .box.wall { background: #a65f47; }
 .box.fuel { background: #e8be42; }

@@ -17,6 +17,7 @@ import { BUILD_CELL, STOVE_PRESETS } from './simulation/presets.mjs';
 import { getFuelPhase } from './physics/fuel-model.mjs';
 import {
   DEFAULT_WALL_MATERIAL_ID,
+  WALL_FACE_BITS,
   WALL_MATERIAL_OPTIONS,
   getWallMaterial,
 } from './physics/wall-materials.mjs';
@@ -76,6 +77,7 @@ app.innerHTML = `
           <span><i class="dot air"></i>藍：空氣 tracer</span>
           <span><i class="dot heat"></i>橘：高溫區</span>
           <span><i class="dot smoke"></i>黑灰：相對黑煙</span>
+          <span><i class="dot wall-heat"></i>磚牆：內側紅橘／外側金橘</span>
           <span><i class="box fuel"></i>金黃→深灰：稻稈→炭；火焰＝燃燒中</span>
           <span>磚牆顏色依導熱係數：</span>
           <div id="wall-material-legend" class="wall-material-legend"></div>
@@ -92,7 +94,7 @@ app.innerHTML = `
           <div id="preset-grid" class="preset-grid"></div>
           <p id="preset-description" class="hint"></p>
         </div>
-        <p class="model-note">Physics v3：稻稈是有限燃料。受熱後先熱裂解成揮發性氣體與炭；黑煙只有在高溫、含氧、充分混合並具有停留時間時才可進一步氧化。灰分來自燃料原有礦物質留下，不代表「碳變成灰」。磚牆會依所選導熱係數 k 傳熱：低導熱較保溫，高導熱較快把熱帶往外側；這是用來比較爐體設計的教學模擬參數。Phase 5 的 GPU 模式已把燃料反應、氣流、標量傳輸、tracer 更新及溫度／黑煙／速度場呈現留在 VGPU/WebGPU；CPU 完整場只約每 6 個 physics tick 回讀一次，供診斷與故障 checkpoint 使用。</p>
+        <p class="model-note">Physics v3：稻稈是有限燃料。受熱後先熱裂解成揮發性氣體與炭；黑煙只有在高溫、含氧、充分混合並具有停留時間時才可進一步氧化。灰分來自燃料原有礦物質留下，不代表「碳變成灰」。磚牆會依所選導熱係數 k 傳熱：低導熱較保溫，高導熱較快把熱帶往外側；現在每格磚再分成內側／外側兩個熱節點，並以等效 Stefan–Boltzmann 輻射模型估算外側散熱。畫面保留不同材料底色，內側用紅橘、外側用金橘呈現熱傳方向，升溫時再依表面溫度加強顏色。這些是用來比較爐體設計的教學模擬參數，不是工程級 CFD 或磚材實測值。Phase 5 的 GPU 模式已把燃料反應、氣流、標量傳輸、tracer 更新及溫度／黑煙／速度場呈現留在 VGPU/WebGPU；CPU 完整場只約每 6 個 physics tick 回讀一次，供診斷與故障 checkpoint 使用。</p>
       </section>
 
       <aside class="panel metrics-panel">
@@ -378,6 +380,9 @@ function renderMetrics() {
     metric('剩餘炭', d.char.toFixed(3)),
     metric('灰分顯現', d.ash.toFixed(3)),
     metric('磚牆平均溫度', `${d.wallTemperature.toFixed(0)} °C`),
+    metric('磚牆內側溫度', `${d.wallInnerTemperature.toFixed(0)} °C`),
+    metric('磚牆外側溫度', `${d.wallOuterTemperature.toFixed(0)} °C`),
+    metric('等效輻射散熱', d.wallRadiationLoss.toExponential(2)),
     metric('平均磚牆導熱係數', `k=${d.averageWallConductivity.toFixed(2)}`),
   ].join('');
 
@@ -467,8 +472,50 @@ function drawCpuField() {
 
   for (const wall of sim.walls) {
     const material = getWallMaterial(wall.materialId);
+    const thermal = getWallBlockThermal(wall);
+    const innerHeat = Math.max(0, Math.min(1, (thermal.innerTemperature - AMBIENT_T) / 100));
+    const outerHeat = Math.max(0, Math.min(1, (thermal.outerTemperature - AMBIENT_T) / 100));
+    const x = wall.x + 1;
+    const y = wall.y + 1;
+    const size = BUILD_CELL - 2;
+    const band = Math.min(4, size * 0.18);
+
     ctx.fillStyle = material.color;
-    ctx.fillRect(wall.x + 1, wall.y + 1, BUILD_CELL - 2, BUILD_CELL - 2);
+    ctx.fillRect(x, y, size, size);
+
+    const centerX = wall.x + BUILD_CELL * 0.5;
+    const centerY = wall.y + BUILD_CELL * 0.5;
+    const span = BUILD_CELL * 0.72;
+    const gradient = ctx.createLinearGradient(
+      centerX + thermal.normalX * span * 0.5,
+      centerY + thermal.normalY * span * 0.5,
+      centerX - thermal.normalX * span * 0.5,
+      centerY - thermal.normalY * span * 0.5,
+    );
+    gradient.addColorStop(0, `rgba(255, 56, 9, ${(innerHeat * 0.72).toFixed(3)})`);
+    gradient.addColorStop(0.48, `rgba(255, 106, 15, ${(Math.max(innerHeat, outerHeat) * 0.18).toFixed(3)})`);
+    gradient.addColorStop(1, `rgba(255, 194, 48, ${(outerHeat * 0.78).toFixed(3)})`);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(x, y, size, size);
+
+    if (innerHeat > 0 || outerHeat > 0) {
+      ctx.fillStyle = `rgba(255, 56, 9, ${(Math.max(innerHeat, outerHeat) * 0.12).toFixed(3)})`;
+      ctx.fillRect(x, y, size, size);
+    }
+
+    const paintFace = (mask: number, color: string, heat: number) => {
+      const alpha = 0.10 + heat * 0.82;
+      ctx.fillStyle = `rgba(${color}, ${alpha.toFixed(3)})`;
+      if (mask & WALL_FACE_BITS.left) ctx.fillRect(x, y, band, size);
+      if (mask & WALL_FACE_BITS.right) ctx.fillRect(x + size - band, y, band, size);
+      if (mask & WALL_FACE_BITS.up) ctx.fillRect(x, y, size, band);
+      if (mask & WALL_FACE_BITS.down) ctx.fillRect(x, y + size - band, size, band);
+    };
+
+    // The outer face is painted first so a corner that is both inner and
+    // outer keeps the red-orange inner surface cue on top.
+    paintFace(thermal.outerFaceMask, '255, 194, 48', outerHeat);
+    paintFace(thermal.innerFaceMask, '255, 56, 9', innerHeat);
     ctx.strokeStyle = material.stroke;
     ctx.strokeRect(wall.x + 1.5, wall.y + 1.5, BUILD_CELL - 3, BUILD_CELL - 3);
   }
@@ -480,6 +527,48 @@ function drawCpuField() {
   }
 
   drawGrid();
+}
+
+function getWallBlockThermal(wall: { x: number; y: number }) {
+  const x0 = Math.floor(wall.x / H);
+  const y0 = Math.floor(wall.y / H);
+  const x1 = Math.min(NX, Math.ceil((wall.x + BUILD_CELL) / H));
+  const y1 = Math.min(NY, Math.ceil((wall.y + BUILD_CELL) / H));
+  let innerTotal = 0;
+  let outerTotal = 0;
+  let count = 0;
+  let innerFaceMask = 0;
+  let outerFaceMask = 0;
+  for (let gy = y0; gy < y1; gy += 1) {
+    for (let gx = x0; gx < x1; gx += 1) {
+      const i = gy * NX + gx;
+      if (!sim.solid[i]) continue;
+      const faceMask = sim.wallInnerFaceMask[i];
+      innerTotal += sim.wallInnerTemperature[i];
+      outerTotal += sim.wallOuterTemperature[i];
+      innerFaceMask |= faceMask;
+      if ((faceMask & WALL_FACE_BITS.left) === 0 && (gx === 0 || !sim.solid[i - 1])) outerFaceMask |= WALL_FACE_BITS.left;
+      if ((faceMask & WALL_FACE_BITS.right) === 0 && (gx + 1 >= NX || !sim.solid[i + 1])) outerFaceMask |= WALL_FACE_BITS.right;
+      if ((faceMask & WALL_FACE_BITS.up) === 0 && (gy === 0 || !sim.solid[i - NX])) outerFaceMask |= WALL_FACE_BITS.up;
+      if ((faceMask & WALL_FACE_BITS.down) === 0 && (gy + 1 >= NY || !sim.solid[i + NX])) outerFaceMask |= WALL_FACE_BITS.down;
+      count += 1;
+    }
+  }
+  const normalX =
+    ((innerFaceMask & WALL_FACE_BITS.right) ? 1 : 0) -
+    ((innerFaceMask & WALL_FACE_BITS.left) ? 1 : 0);
+  const normalY =
+    ((innerFaceMask & WALL_FACE_BITS.down) ? 1 : 0) -
+    ((innerFaceMask & WALL_FACE_BITS.up) ? 1 : 0);
+  const normalLength = Math.hypot(normalX, normalY);
+  return {
+    innerTemperature: count ? innerTotal / count : AMBIENT_T,
+    outerTemperature: count ? outerTotal / count : AMBIENT_T,
+    innerFaceMask,
+    outerFaceMask,
+    normalX: normalLength > 0 ? normalX / normalLength : 0,
+    normalY: normalLength > 0 ? normalY / normalLength : -1,
+  };
 }
 
 function drawGpuOverlay() {

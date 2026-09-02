@@ -11,9 +11,13 @@ export type CpuAirflowSnapshot = {
   volatileGas?: Float32Array;
   exhaustGas?: Float32Array;
   secondaryResidence?: Float32Array;
+  /** Compatibility average; inner/outer values take precedence when present. */
   wallTemperature?: Float32Array;
+  wallInnerTemperature?: Float32Array;
+  wallOuterTemperature?: Float32Array;
   wallConductivity?: Float32Array;
   wallMaterial?: Uint8Array | Uint32Array;
+  wallInnerFaceMask?: Uint8Array | Uint32Array;
   fuelMask?: Uint8Array | Uint32Array;
   rawStraw?: Float32Array;
   char?: Float32Array;
@@ -24,6 +28,8 @@ export type CpuAirflowSnapshot = {
 export type GpuScalarState = {
   temperature: Float32Array;
   wallTemperature: Float32Array;
+  wallInnerTemperature: Float32Array;
+  wallOuterTemperature: Float32Array;
   oxygen: Float32Array;
   smoke: Float32Array;
   volatileGas: Float32Array;
@@ -68,8 +74,10 @@ export class GpuFieldRegistry {
   readonly boundaryFlux: PingPong;
 
   readonly temperature: PingPong;
-  readonly wallTemperature: PingPong;
-  readonly wallConductivity: StorageBuffer;
+  readonly wallInnerTemperature: PingPong;
+  readonly wallOuterTemperature: PingPong;
+  /** Per-cell xy data: conductivity, inner-face bit mask. */
+  readonly wallThermalProperties: StorageBuffer;
   readonly wallMaterial: StorageBuffer;
   readonly oxygen: PingPong;
   readonly smoke: PingPong;
@@ -99,8 +107,9 @@ export class GpuFieldRegistry {
     this.boundaryFlux = pingPongStorage(gpu, cellCount * 8);
 
     this.temperature = pingPongStorage(gpu, cellCount * 4);
-    this.wallTemperature = pingPongStorage(gpu, cellCount * 4);
-    this.wallConductivity = storage(gpu, cellCount * 4, 'read');
+    this.wallInnerTemperature = pingPongStorage(gpu, cellCount * 4);
+    this.wallOuterTemperature = pingPongStorage(gpu, cellCount * 4);
+    this.wallThermalProperties = storage(gpu, cellCount * 8, 'read');
     this.wallMaterial = storage(gpu, cellCount * 4, 'read');
     this.oxygen = pingPongStorage(gpu, cellCount * 4);
     this.smoke = pingPongStorage(gpu, cellCount * 4);
@@ -135,8 +144,11 @@ export class GpuFieldRegistry {
     this.assertOptionalLength(snapshot.exhaustGas, 'exhaustGas');
     this.assertOptionalLength(snapshot.secondaryResidence, 'secondaryResidence');
     this.assertOptionalLength(snapshot.wallTemperature, 'wallTemperature');
+    this.assertOptionalLength(snapshot.wallInnerTemperature, 'wallInnerTemperature');
+    this.assertOptionalLength(snapshot.wallOuterTemperature, 'wallOuterTemperature');
     this.assertOptionalLength(snapshot.wallConductivity, 'wallConductivity');
     this.assertOptionalLength(snapshot.wallMaterial, 'wallMaterial');
+    this.assertOptionalLength(snapshot.wallInnerFaceMask, 'wallInnerFaceMask');
     this.assertOptionalLength(snapshot.fuelMask, 'fuelMask');
     this.assertOptionalLength(snapshot.rawStraw, 'rawStraw');
     this.assertOptionalLength(snapshot.char, 'char');
@@ -149,8 +161,13 @@ export class GpuFieldRegistry {
     if (snapshot.fuelMask) fuelMask32.set(snapshot.fuelMask);
     const wallMaterial32 = new Uint32Array(this.cellCount);
     if (snapshot.wallMaterial) wallMaterial32.set(snapshot.wallMaterial);
+    const wallThermalProperties = new Float32Array(this.cellCount * 2);
+    const wallInnerTemperature = snapshot.wallInnerTemperature ?? snapshot.wallTemperature;
+    const wallOuterTemperature = snapshot.wallOuterTemperature ?? snapshot.wallTemperature;
     const velocity = new Float32Array(this.cellCount * 2);
     for (let i = 0; i < this.cellCount; i += 1) {
+      wallThermalProperties[i * 2] = snapshot.wallConductivity?.[i] ?? 0;
+      wallThermalProperties[i * 2 + 1] = snapshot.wallInnerFaceMask?.[i] ?? 0;
       velocity[i * 2] = snapshot.u[i] ?? 0;
       velocity[i * 2 + 1] = snapshot.v[i] ?? 0;
     }
@@ -158,12 +175,13 @@ export class GpuFieldRegistry {
     this.solid.write(solid32.buffer);
     this.fuelMask.write(fuelMask32.buffer);
     this.wallMaterial.write(wallMaterial32.buffer);
-    this.writeStorage(this.wallConductivity, snapshot.wallConductivity, 0);
+    this.wallThermalProperties.write(wallThermalProperties.buffer);
     this.velocity.read.write(velocity.buffer);
     this.velocity.write.write(velocity.buffer);
 
     this.writeScalarPair(this.temperature, snapshot.temperature, DEFAULT_FUEL_PARAMS.ambientTemperature);
-    this.writeScalarPair(this.wallTemperature, snapshot.wallTemperature, DEFAULT_FUEL_PARAMS.ambientTemperature);
+    this.writeScalarPair(this.wallInnerTemperature, wallInnerTemperature, DEFAULT_FUEL_PARAMS.ambientTemperature);
+    this.writeScalarPair(this.wallOuterTemperature, wallOuterTemperature, DEFAULT_FUEL_PARAMS.ambientTemperature);
     this.writeScalarPair(this.oxygen, snapshot.oxygen, 1);
     this.writeScalarPair(this.smoke, snapshot.smoke, 0);
     this.writeScalarPair(this.volatileGas, snapshot.volatileGas, 0);
@@ -239,18 +257,27 @@ export class GpuFieldRegistry {
   }
 
   async readScalarState(): Promise<GpuScalarState> {
-    const [temperature, wallTemperature, oxygen, smoke, volatileGas, exhaustGas, secondaryResidence] = await Promise.all([
+    const [temperature, wallInnerTemperature, wallOuterTemperature, oxygen, smoke, volatileGas, exhaustGas, secondaryResidence] = await Promise.all([
       this.temperature.read.read(),
-      this.wallTemperature.read.read(),
+      this.wallInnerTemperature.read.read(),
+      this.wallOuterTemperature.read.read(),
       this.oxygen.read.read(),
       this.smoke.read.read(),
       this.volatileGas.read.read(),
       this.exhaustGas.read.read(),
       this.secondaryResidence.read.read(),
     ]);
+    const inner = new Float32Array(wallInnerTemperature);
+    const outer = new Float32Array(wallOuterTemperature);
+    const average = new Float32Array(this.cellCount);
+    for (let i = 0; i < this.cellCount; i += 1) {
+      average[i] = (inner[i] + outer[i]) * 0.5;
+    }
     return {
       temperature: new Float32Array(temperature),
-      wallTemperature: new Float32Array(wallTemperature),
+      wallTemperature: average,
+      wallInnerTemperature: inner,
+      wallOuterTemperature: outer,
       oxygen: new Float32Array(oxygen),
       smoke: new Float32Array(smoke),
       volatileGas: new Float32Array(volatileGas),
@@ -325,8 +352,9 @@ export class GpuFieldRegistry {
     destroyStorage(this.divergence);
     this.destroyPair(this.boundaryFlux);
     this.destroyPair(this.temperature);
-    this.destroyPair(this.wallTemperature);
-    destroyStorage(this.wallConductivity);
+    this.destroyPair(this.wallInnerTemperature);
+    this.destroyPair(this.wallOuterTemperature);
+    destroyStorage(this.wallThermalProperties);
     destroyStorage(this.wallMaterial);
     this.destroyPair(this.oxygen);
     this.destroyPair(this.smoke);
@@ -363,7 +391,15 @@ export class GpuFieldRegistry {
     const data = new Float32Array(this.cellCount * 4);
     for (let i = 0; i < this.cellCount; i += 1) {
       const offset = i * 4;
-      data[offset] = snapshot.temperature[i] ?? DEFAULT_FUEL_PARAMS.ambientTemperature;
+      const innerTemperature = snapshot.wallInnerTemperature?.[i]
+        ?? snapshot.wallTemperature?.[i]
+        ?? DEFAULT_FUEL_PARAMS.ambientTemperature;
+      const outerTemperature = snapshot.wallOuterTemperature?.[i]
+        ?? snapshot.wallTemperature?.[i]
+        ?? DEFAULT_FUEL_PARAMS.ambientTemperature;
+      data[offset] = snapshot.solid[i]
+        ? (innerTemperature + outerTemperature) * 0.5
+        : snapshot.temperature[i] ?? DEFAULT_FUEL_PARAMS.ambientTemperature;
       data[offset + 1] = snapshot.smoke?.[i] ?? 0;
       data[offset + 2] = snapshot.rawStraw?.[i] ?? 0;
       data[offset + 3] = snapshot.char?.[i] ?? 0;

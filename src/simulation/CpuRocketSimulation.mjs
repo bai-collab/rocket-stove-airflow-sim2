@@ -8,9 +8,12 @@ import {
 } from '../physics/fuel-model.mjs';
 import {
   DEFAULT_WALL_MATERIAL_ID,
+  WALL_FACE_BITS,
   WALL_CONDUCTION_PARAMS,
   getWallMaterial,
   normalizeWallMaterialId,
+  radiativeHeatFlux,
+  radiativeHeatTransfer,
 } from '../physics/wall-materials.mjs';
 
 export const SIM_WIDTH = 900;
@@ -28,6 +31,12 @@ export const MAX_SPEED = 180;
 const PRESSURE_ITERS = 36;
 const TRACE_STEP = Math.max(2, H * 0.35);
 const DEFAULT_TRACERS = 320;
+const WALL_FACE_DIRECTIONS = Object.freeze([
+  Object.freeze({ dx: -1, dy: 0, bit: WALL_FACE_BITS.left }),
+  Object.freeze({ dx: 1, dy: 0, bit: WALL_FACE_BITS.right }),
+  Object.freeze({ dx: 0, dy: -1, bit: WALL_FACE_BITS.up }),
+  Object.freeze({ dx: 0, dy: 1, bit: WALL_FACE_BITS.down }),
+]);
 
 const FUEL = DEFAULT_FUEL_PARAMS;
 const GRID_EPSILON = 1e-5;
@@ -78,8 +87,16 @@ export class CpuRocketSimulation {
     this.ash = new Float32Array(N);
     this.wallTemperature = new Float32Array(N);
     this.wallTemperaturePrev = new Float32Array(N);
+    this.wallInnerTemperature = new Float32Array(N);
+    this.wallInnerTemperaturePrev = new Float32Array(N);
+    this.wallOuterTemperature = new Float32Array(N);
+    this.wallOuterTemperaturePrev = new Float32Array(N);
     this.wallConductivity = new Float32Array(N);
     this.wallMaterial = new Uint8Array(N);
+    this.wallInnerFaceMask = new Uint8Array(N);
+    this.wallInnerDelta = new Float32Array(N);
+    this.wallOuterDelta = new Float32Array(N);
+    this.fluidThermalDelta = new Float32Array(N);
     this.solid = new Uint8Array(N);
     this.fuelMask = new Uint8Array(N);
     this.fuelInitialOrganic = new Float32Array(N);
@@ -126,7 +143,10 @@ export class CpuRocketSimulation {
     this.secondaryResidence.fill(0); this.secondaryResidencePrev.fill(0);
     this.rawStraw.fill(0); this.char.fill(0); this.mineralMatter.fill(0); this.ash.fill(0);
     this.wallTemperature.fill(AMBIENT_T); this.wallTemperaturePrev.fill(AMBIENT_T);
-    this.wallConductivity.fill(0); this.wallMaterial.fill(0);
+    this.wallInnerTemperature.fill(AMBIENT_T); this.wallInnerTemperaturePrev.fill(AMBIENT_T);
+    this.wallOuterTemperature.fill(AMBIENT_T); this.wallOuterTemperaturePrev.fill(AMBIENT_T);
+    this.wallConductivity.fill(0); this.wallMaterial.fill(0); this.wallInnerFaceMask.fill(0);
+    this.wallInnerDelta.fill(0); this.wallOuterDelta.fill(0); this.fluidThermalDelta.fill(0);
     this.solid.fill(0); this.fuelMask.fill(0);
     this.fuelInitialOrganic.fill(0); this.fuelInitialMineral.fill(0);
     this.time = 0;
@@ -220,6 +240,7 @@ export class CpuRocketSimulation {
     this.fuelMask.fill(0);
     this.wallMaterial.fill(0);
     this.wallConductivity.fill(0);
+    this.wallInnerFaceMask.fill(0);
 
     for (const wall of this.walls) {
       const material = getWallMaterial(wall.materialId);
@@ -246,6 +267,10 @@ export class CpuRocketSimulation {
       this.oxygenPrev[i] = solid ? 0 : AMBIENT_O2;
       this.wallTemperature[i] = AMBIENT_T;
       this.wallTemperaturePrev[i] = AMBIENT_T;
+      this.wallInnerTemperature[i] = AMBIENT_T;
+      this.wallInnerTemperaturePrev[i] = AMBIENT_T;
+      this.wallOuterTemperature[i] = AMBIENT_T;
+      this.wallOuterTemperaturePrev[i] = AMBIENT_T;
       this.smoke[i] = 0; this.smokePrev[i] = 0;
       this.volatileGas[i] = 0; this.volatilePrev[i] = 0;
       this.exhaustGas[i] = 0; this.exhaustPrev[i] = 0;
@@ -293,10 +318,73 @@ export class CpuRocketSimulation {
       }
     }
 
+    this.buildWallInnerFaceMask();
     this.initialOrganic = this.sum(this.fuelInitialOrganic);
     this.initialMineral = this.sum(this.fuelInitialMineral);
 
     this.relocateTracersOutOfSolids();
+  }
+
+  buildWallInnerFaceMask() {
+    const distance = new Int32Array(N);
+    distance.fill(-1);
+    const queue = new Int32Array(N);
+    let head = 0;
+    let tail = 0;
+
+    for (let i = 0; i < N; i += 1) {
+      if (this.fuelMask[i] && !this.solid[i]) {
+        distance[i] = 0;
+        queue[tail] = i;
+        tail += 1;
+      }
+    }
+
+    while (head < tail) {
+      const current = queue[head];
+      head += 1;
+      const x = current % NX;
+      const y = Math.floor(current / NX);
+      const nextDistance = distance[current] + 1;
+      for (const { dx, dy } of WALL_FACE_DIRECTIONS) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= NX || ny >= NY) continue;
+        const neighbour = idx(nx, ny);
+        if (this.solid[neighbour] || distance[neighbour] >= 0) continue;
+        distance[neighbour] = nextDistance;
+        queue[tail] = neighbour;
+        tail += 1;
+      }
+    }
+
+    for (let y = 0; y < NY; y += 1) {
+      for (let x = 0; x < NX; x += 1) {
+        const i = idx(x, y);
+        if (!this.solid[i]) continue;
+
+        let closest = Infinity;
+        for (const { dx, dy } of WALL_FACE_DIRECTIONS) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= NX || ny >= NY) continue;
+          const neighbour = idx(nx, ny);
+          if (this.solid[neighbour] || distance[neighbour] < 0) continue;
+          closest = Math.min(closest, distance[neighbour]);
+        }
+        if (!Number.isFinite(closest)) continue;
+
+        let mask = 0;
+        for (const { dx, dy, bit } of WALL_FACE_DIRECTIONS) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= NX || ny >= NY) continue;
+          const neighbour = idx(nx, ny);
+          if (!this.solid[neighbour] && distance[neighbour] === closest) mask |= bit;
+        }
+        this.wallInnerFaceMask[i] = mask;
+      }
+    }
   }
 
   step(dt = DT) {
@@ -325,7 +413,7 @@ export class CpuRocketSimulation {
     this.advectField(this.exhaustGas, this.exhaustPrev, this.u, this.v, dt, 0, true, true);
     this.advectField(this.secondaryResidence, this.secondaryResidencePrev, this.u, this.v, dt, 0, true);
 
-    this.applyWallConduction(dt);
+    this.applyWallThermalExchange(dt);
     this.coolAndMix(dt);
     this.updateSecondaryResidence(dt);
     this.applySecondaryCombustion(dt);
@@ -447,19 +535,31 @@ export class CpuRocketSimulation {
     }
   }
 
-  applyWallConduction(dt) {
+  applyWallThermalExchange(dt) {
     if (!(dt > 0)) return;
 
     this.temperaturePrev.set(this.temperature);
-    this.wallTemperaturePrev.set(this.wallTemperature);
+    this.wallInnerTemperaturePrev.set(this.wallInnerTemperature);
+    this.wallOuterTemperaturePrev.set(this.wallOuterTemperature);
+    this.wallInnerDelta.fill(0);
+    this.wallOuterDelta.fill(0);
+    this.fluidThermalDelta.fill(0);
 
     const {
       referenceConductivity,
       couplingRate,
       wallHeatCapacity,
+      surfaceHeatCapacity,
+      throughWallRate,
     } = WALL_CONDUCTION_PARAMS;
+    const surfaceCapacity = Math.max(surfaceHeatCapacity, wallHeatCapacity * 0.5);
     const interfaceRate = (conductivity) => clamp(
       Math.max(0, conductivity) / Math.max(referenceConductivity, 1e-6) * couplingRate * dt,
+      0,
+      0.24,
+    );
+    const slabRate = (conductivity) => clamp(
+      Math.max(0, conductivity) / Math.max(referenceConductivity, 1e-6) * throughWallRate * dt,
       0,
       0.24,
     );
@@ -468,52 +568,83 @@ export class CpuRocketSimulation {
       return (2 * a * b) / (a + b);
     };
 
-    const contribution = (x, y, currentTemperature, currentSolid, currentConductivity) => {
-      if (x < 0 || y < 0 || x >= NX || y >= NY) {
-        if (!currentSolid) return 0;
-        return (AMBIENT_T - currentTemperature) * interfaceRate(currentConductivity) / wallHeatCapacity;
-      }
-
-      const neighbour = idx(x, y);
-      const neighbourSolid = this.solid[neighbour] === 1;
-      if (!currentSolid && !neighbourSolid) return 0;
-
-      const neighbourTemperature = neighbourSolid
-        ? this.wallTemperaturePrev[neighbour]
-        : this.temperaturePrev[neighbour];
-      const conductivity = currentSolid && neighbourSolid
-        ? harmonicConductivity(currentConductivity, this.wallConductivity[neighbour])
-        : neighbourSolid
-          ? this.wallConductivity[neighbour]
-          : currentConductivity;
-      const response = interfaceRate(conductivity);
-      const capacity = currentSolid ? wallHeatCapacity : 1;
-      return (neighbourTemperature - currentTemperature) * response / capacity;
-    };
-
     for (let y = 0; y < NY; y += 1) {
       for (let x = 0; x < NX; x += 1) {
         const i = idx(x, y);
-        const currentSolid = this.solid[i] === 1;
-        const currentTemperature = currentSolid
-          ? this.wallTemperaturePrev[i]
-          : this.temperaturePrev[i];
-        const currentConductivity = currentSolid ? this.wallConductivity[i] : 0;
-        const delta =
-          contribution(x - 1, y, currentTemperature, currentSolid, currentConductivity) +
-          contribution(x + 1, y, currentTemperature, currentSolid, currentConductivity) +
-          contribution(x, y - 1, currentTemperature, currentSolid, currentConductivity) +
-          contribution(x, y + 1, currentTemperature, currentSolid, currentConductivity);
-        const nextTemperature = clamp(
-          currentTemperature + delta,
+        if (!this.solid[i]) continue;
+
+        const innerTemperature = this.wallInnerTemperaturePrev[i];
+        const outerTemperature = this.wallOuterTemperaturePrev[i];
+        const conductivity = this.wallConductivity[i];
+        const throughWall = (outerTemperature - innerTemperature) * slabRate(conductivity);
+        this.wallInnerDelta[i] += throughWall;
+        this.wallOuterDelta[i] -= throughWall;
+
+        let hasOuterFluid = false;
+        for (const { dx, dy, bit } of WALL_FACE_DIRECTIONS) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= NX || ny >= NY) continue;
+          const neighbour = idx(nx, ny);
+          if (this.solid[neighbour]) {
+            const neighbourConductivity = this.wallConductivity[neighbour];
+            const interfaceConductivity = harmonicConductivity(conductivity, neighbourConductivity);
+            const response = interfaceRate(interfaceConductivity) / surfaceCapacity;
+            const innerTransfer = (this.wallInnerTemperaturePrev[neighbour] - innerTemperature) * response;
+            const outerTransfer = (this.wallOuterTemperaturePrev[neighbour] - outerTemperature) * response;
+            this.wallInnerDelta[i] += innerTransfer;
+            this.wallOuterDelta[i] += outerTransfer;
+            continue;
+          }
+
+          const isInnerFace = (this.wallInnerFaceMask[i] & bit) !== 0;
+          const surfaceDelta = isInnerFace ? this.wallInnerDelta : this.wallOuterDelta;
+          const surfaceTemperature = isInnerFace ? innerTemperature : outerTemperature;
+          const fluidTemperature = this.temperaturePrev[neighbour];
+          const conductiveTransfer = (surfaceTemperature - fluidTemperature) * interfaceRate(conductivity);
+          const radiativeTransfer = radiativeHeatTransfer(surfaceTemperature, fluidTemperature, dt);
+          this.fluidThermalDelta[neighbour] += conductiveTransfer + radiativeTransfer;
+          surfaceDelta[i] -= conductiveTransfer / surfaceCapacity;
+          surfaceDelta[i] -= radiativeTransfer / surfaceCapacity;
+          if (!isInnerFace) hasOuterFluid = true;
+        }
+
+        if (!hasOuterFluid) {
+          const ambientRadiation = radiativeHeatTransfer(outerTemperature, AMBIENT_T, dt);
+          this.wallOuterDelta[i] -= ambientRadiation / surfaceCapacity;
+        }
+      }
+    }
+
+    for (let i = 0; i < N; i += 1) {
+      if (this.solid[i]) {
+        const innerTemperature = clamp(
+          this.wallInnerTemperaturePrev[i] + this.wallInnerDelta[i],
           AMBIENT_T,
           MAX_T,
         );
-
-        if (currentSolid) this.wallTemperature[i] = nextTemperature;
-        else this.temperature[i] = nextTemperature;
+        const outerTemperature = clamp(
+          this.wallOuterTemperaturePrev[i] + this.wallOuterDelta[i],
+          AMBIENT_T,
+          MAX_T,
+        );
+        this.wallInnerTemperature[i] = innerTemperature;
+        this.wallOuterTemperature[i] = outerTemperature;
+        this.wallTemperature[i] = (innerTemperature + outerTemperature) * 0.5;
+      } else {
+        this.temperature[i] = clamp(
+          this.temperaturePrev[i] + this.fluidThermalDelta[i],
+          AMBIENT_T,
+          MAX_T,
+        );
       }
     }
+  }
+
+  // Keep the previous internal name available to deterministic tests and
+  // integrations while the pass now includes surface radiation as well.
+  applyWallConduction(dt) {
+    this.applyWallThermalExchange(dt);
   }
 
   traceStatus(x0, y0, x1, y1) {
@@ -953,11 +1084,20 @@ export class CpuRocketSimulation {
     let fuelTemperature = 0;
     let fuelCells = 0;
     let wallTemperature = 0;
+    let wallInnerTemperature = 0;
+    let wallOuterTemperature = 0;
+    let wallRadiationLoss = 0;
     let wallConductivity = 0;
     let wallCells = 0;
     for (let i = 0; i < N; i += 1) {
       if (this.solid[i]) {
         wallTemperature += this.wallTemperature[i];
+        wallInnerTemperature += this.wallInnerTemperature[i];
+        wallOuterTemperature += this.wallOuterTemperature[i];
+        wallRadiationLoss += Math.max(
+          0,
+          radiativeHeatFlux(this.wallOuterTemperature[i], AMBIENT_T),
+        );
         wallConductivity += this.wallConductivity[i];
         wallCells += 1;
       } else {
@@ -1018,6 +1158,9 @@ export class CpuRocketSimulation {
       reactiveFuel: raw + char + volatile,
       averageTemperature: this.average(this.temperature),
       wallTemperature: wallCells ? wallTemperature / wallCells : AMBIENT_T,
+      wallInnerTemperature: wallCells ? wallInnerTemperature / wallCells : AMBIENT_T,
+      wallOuterTemperature: wallCells ? wallOuterTemperature / wallCells : AMBIENT_T,
+      wallRadiationLoss: wallCells ? wallRadiationLoss / wallCells : 0,
       averageWallConductivity: wallCells ? wallConductivity / wallCells : 0,
       smokeOut: this.smokeOutTotal,
       volatileOut: this.volatileOutTotal,

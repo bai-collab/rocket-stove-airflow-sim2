@@ -358,6 +358,8 @@ export class BrowserSimulationController {
     this.cpu.v.set(velocity.v);
     this.cpu.temperature.set(scalars.temperature);
     this.cpu.wallTemperature.set(scalars.wallTemperature);
+    this.cpu.wallInnerTemperature.set(scalars.wallInnerTemperature);
+    this.cpu.wallOuterTemperature.set(scalars.wallOuterTemperature);
     this.cpu.oxygen.set(scalars.oxygen);
     this.cpu.smoke.set(scalars.smoke);
     this.cpu.volatileGas.set(scalars.volatileGas);
@@ -400,8 +402,11 @@ export class BrowserSimulationController {
     gpu.uploadAirflowState({
       temperature: this.cpu.temperature,
       wallTemperature: this.cpu.wallTemperature,
+      wallInnerTemperature: this.cpu.wallInnerTemperature,
+      wallOuterTemperature: this.cpu.wallOuterTemperature,
       wallConductivity: this.cpu.wallConductivity,
       wallMaterial: this.cpu.wallMaterial,
+      wallInnerFaceMask: this.cpu.wallInnerFaceMask,
       solid: this.cpu.solid,
       u: this.cpu.u,
       v: this.cpu.v,

@@ -220,7 +220,7 @@ export class GpuSimulationBackend implements SimulationBackend {
 
   step(dt: number): void {
     this.runTransport(dt, true);
-    this.runWallConduction(dt);
+    this.runWallThermalExchange(dt);
     this.updateRenderState();
   }
 
@@ -234,7 +234,7 @@ export class GpuSimulationBackend implements SimulationBackend {
     const workgroups = Math.ceil(this.cellCount / 64);
     this.runFuelTransformation(dt, Boolean(options.ignitionActive), workgroups);
     this.runTransport(dt, false);
-    this.runWallConduction(dt);
+    this.runWallThermalExchange(dt);
     this.runCoolingResidence(dt, workgroups);
     this.runSecondaryCombustion(dt, workgroups);
     this.exchangeOpenBoundaryScalars(dt, workgroups);
@@ -266,6 +266,9 @@ export class GpuSimulationBackend implements SimulationBackend {
       render_state: fields.renderState,
       ash: fields.ash,
       wall_material: fields.wallMaterial,
+      wall_thermal: fields.wallThermalProperties,
+      wall_inner_temperature: fields.wallInnerTemperature.read,
+      wall_outer_temperature: fields.wallOuterTemperature.read,
     });
 
     tracerDraw.set({
@@ -448,7 +451,7 @@ export class GpuSimulationBackend implements SimulationBackend {
       .dispatch(workgroups);
   }
 
-  private runWallConduction(dt: number): void {
+  private runWallThermalExchange(dt: number): void {
     const fields = this.requireFields();
     const workgroups = Math.ceil(this.cellCount / 64);
     this.requirePass(this.wallConduction, 'wallConduction')
@@ -459,20 +462,31 @@ export class GpuSimulationBackend implements SimulationBackend {
           max_temperature: FUEL.maxTemperature,
           coupling_rate: WALL_CONDUCTION_PARAMS.couplingRate,
           wall_heat_capacity: WALL_CONDUCTION_PARAMS.wallHeatCapacity,
+          surface_heat_capacity: WALL_CONDUCTION_PARAMS.surfaceHeatCapacity,
+          through_wall_rate: WALL_CONDUCTION_PARAMS.throughWallRate,
           reference_conductivity: WALL_CONDUCTION_PARAMS.referenceConductivity,
+          emissivity: WALL_CONDUCTION_PARAMS.emissivity,
+          stefan_boltzmann: WALL_CONDUCTION_PARAMS.stefanBoltzmann,
+          radiation_scale: WALL_CONDUCTION_PARAMS.radiationScale,
           nx: this.nx,
           ny: this.ny,
+          _pad0: 0,
+          _pad1: 0,
+          _pad2: 0,
         },
         solid: fields.solid,
-        wall_conductivity: fields.wallConductivity,
+        wall_thermal: fields.wallThermalProperties,
         temperature_src: fields.temperature.read,
         temperature_dst: fields.temperature.write,
-        wall_temperature_src: fields.wallTemperature.read,
-        wall_temperature_dst: fields.wallTemperature.write,
+        wall_inner_temperature_src: fields.wallInnerTemperature.read,
+        wall_inner_temperature_dst: fields.wallInnerTemperature.write,
+        wall_outer_temperature_src: fields.wallOuterTemperature.read,
+        wall_outer_temperature_dst: fields.wallOuterTemperature.write,
       })
       .dispatch(workgroups);
     fields.temperature.swap();
-    fields.wallTemperature.swap();
+    fields.wallInnerTemperature.swap();
+    fields.wallOuterTemperature.swap();
   }
 
   private runCoolingResidence(dt: number, workgroups: number): void {
@@ -574,6 +588,9 @@ export class GpuSimulationBackend implements SimulationBackend {
         raw_straw: fields.rawStraw,
         char_mass: fields.char,
         render_state: fields.renderState,
+        solid: fields.solid,
+        wall_inner_temperature: fields.wallInnerTemperature.read,
+        wall_outer_temperature: fields.wallOuterTemperature.read,
       })
       .dispatch(Math.ceil(this.cellCount / 64));
     this.updateTracerRenderState();

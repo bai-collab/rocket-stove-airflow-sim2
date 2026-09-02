@@ -7,7 +7,11 @@ import {
   NX,
   NY,
 } from '../src/simulation/CpuRocketSimulation.mjs';
-import { getWallMaterial } from '../src/physics/wall-materials.mjs';
+import {
+  getWallMaterial,
+  radiativeHeatTransfer,
+  WALL_FACE_BITS,
+} from '../src/physics/wall-materials.mjs';
 
 function run(sim, steps) {
   for (let i = 0; i < steps; i += 1) sim.step(DT);
@@ -118,6 +122,34 @@ test('higher wall conductivity transfers more heat during one conduction step', 
   const high = run('conductive');
   assert.ok(high.wallTemperature > low.wallTemperature);
   assert.ok(high.fluidTemperature < low.fluidTemperature);
+});
+
+test('wall surfaces separate the fuel side from the outer air side', () => {
+  const sim = new CpuRocketSimulation();
+  sim.clearScene();
+  sim.setToolAt('fuel', 0, 0);
+  sim.setToolAt('wall', 24, 0, 'standard');
+
+  const wall = 2;
+  const outerWall = 3;
+  const fuelSideAir = 1;
+  const outerSideAir = 4;
+  assert.ok((sim.wallInnerFaceMask[wall] & WALL_FACE_BITS.left) !== 0);
+
+  sim.wallOuterTemperature[wall] = 500;
+  sim.applyWallThermalExchange(DT);
+
+  assert.ok(sim.wallOuterTemperature[wall] > sim.wallInnerTemperature[wall]);
+  sim.wallInnerTemperature[wall] = 500;
+  sim.wallOuterTemperature[wall] = AMBIENT_T;
+  sim.applyWallThermalExchange(DT);
+  assert.ok(sim.temperature[fuelSideAir] > AMBIENT_T);
+
+  sim.wallOuterTemperature[outerWall] = 500;
+  sim.applyWallThermalExchange(DT);
+  assert.ok(sim.temperature[outerSideAir] > AMBIENT_T);
+  assert.ok(radiativeHeatTransfer(500, AMBIENT_T, DT) > 0);
+  assert.ok(radiativeHeatTransfer(AMBIENT_T, 500, DT) < 0);
 });
 
 test('sealed stove does not keep fuel-zone oxygen at ambient after combustion starts', () => {

@@ -126,13 +126,20 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
   const solidData = new Uint32Array(count);
   solidData[1] = 1;
   const wallMaterialData = new Uint32Array(count);
-  wallMaterialData[1] = 2;
+  wallMaterialData[1] = 3;
+  const wallThermalData = new Float32Array(count * 2);
+  // Cell 1 has a hot inner face on the left; its top edge is an outer face.
+  wallThermalData[1 * 2 + 1] = 1;
   const velocityData = new Float32Array(count * 2);
   velocityData[5 * 2] = 35;
   velocityData[5 * 2 + 1] = -12;
   const temperatureData = new Float32Array(count).fill(25);
   temperatureData[5] = 520;
   temperatureData[9] = 180;
+  const wallInnerTemperatureData = new Float32Array(count).fill(25);
+  const wallOuterTemperatureData = new Float32Array(count).fill(25);
+  wallInnerTemperatureData[1] = 220;
+  wallOuterTemperatureData[1] = 180;
   const smokeData = new Float32Array(count);
   smokeData[6] = 0.18;
   const rawData = new Float32Array(count);
@@ -154,6 +161,9 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
   const raw = storage(gpu, count * 4, 'read');
   const charMass = storage(gpu, count * 4, 'read');
   const ash = storage(gpu, count * 4, 'read');
+  const wallInnerTemperature = storage(gpu, count * 4, 'read');
+  const wallOuterTemperature = storage(gpu, count * 4, 'read');
+  const wallThermal = storage(gpu, count * 8, 'read');
   const renderState = storage(gpu, count * 16, 'read-write');
   const tracers = gpu.device.createBuffer({
     size: tracerCount * 16,
@@ -171,6 +181,9 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
     raw.write(rawData);
     charMass.write(charData);
     ash.write(ashData);
+    wallInnerTemperature.write(wallInnerTemperatureData);
+    wallOuterTemperature.write(wallOuterTemperatureData);
+    wallThermal.write(wallThermalData);
     tracers.write(tracerData);
 
     const pack = compute(gpu, packRenderStateShader, {
@@ -181,6 +194,9 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
         raw_straw: raw,
         char_mass: charMass,
         render_state: renderState,
+        solid,
+        wall_inner_temperature: wallInnerTemperature,
+        wall_outer_temperature: wallOuterTemperature,
       },
     });
     pack.dispatch(1);
@@ -212,6 +228,9 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
         render_state: renderState,
         ash,
         wall_material: wallMaterial,
+        wall_thermal: wallThermal,
+        wall_inner_temperature: wallInnerTemperature,
+        wall_outer_temperature: wallOuterTemperature,
       },
     });
     const dots = draw(gpu, {
@@ -245,21 +264,25 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
     let warm = 0;
     let dark = 0;
     let smokeCellDark = 0;
+    let heatedWall = 0;
     let changed = 0;
     for (let i = 0; i < combined.length; i += 4) {
       const pixel = i / 4;
       const pixelX = pixel % width;
       const pixelY = Math.floor(pixel / width);
-      const r = combined[i];
-      const g = combined[i + 1];
-      const b = combined[i + 2];
-      if (r > 110 && r < 180 && g > 65 && g < 130 && b < 100) brownish += 1;
+    const r = combined[i];
+    const g = combined[i + 1];
+    const b = combined[i + 2];
+      if (r > 100 && g > 40 && b < 130) brownish += 1;
       if (r > g * 1.25 && r > b * 1.4 && r > 130) warm += 1;
       if (r < 150 && g < 150 && b < 160) dark += 1;
       // Cell 6 is intentionally smoke-only: isolate it from the brown wall
       // and fuel colors so the assertion checks the smoke mapping itself.
       if (pixelX >= 96 && pixelX < 144 && pixelY >= 48 && pixelY < 96 && r < 180 && g < 180 && b < 180) {
         smokeCellDark += 1;
+      }
+      if (pixelX >= 48 && pixelX < 96 && pixelY >= 0 && pixelY < 48 && r > g * 1.35 && r > b * 1.6 && r > 150) {
+        heatedWall += 1;
       }
       if (
         Math.abs(r - base[i]) +
@@ -268,10 +291,23 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
       ) changed += 1;
     }
 
+    const pixelAt = (x, y) => (y * width + x) * 4;
+    const innerEdge = pixelAt(51, 24);
+    const outerEdge = pixelAt(72, 3);
+    assert.ok(
+      base[innerEdge] > base[innerEdge + 1] * 1.20 && base[innerEdge] > base[innerEdge + 2] * 1.50,
+      `expected red-orange inner face, got ${base[innerEdge]},${base[innerEdge + 1]},${base[innerEdge + 2]}`
+    );
+    assert.ok(
+      base[outerEdge + 1] > base[outerEdge + 2] * 1.20,
+      `expected gold outer face, got ${base[outerEdge]},${base[outerEdge + 1]},${base[outerEdge + 2]}`
+    );
+
     assert.ok(brownish > 300, `expected wall/fuel brown pixels, got ${brownish}`);
     assert.ok(warm > 150, `expected hot tracer/temperature pixels, got ${warm}`);
     assert.ok(dark > 150, `expected smoke/char dark pixels, got ${dark}`);
     assert.ok(smokeCellDark > 1500, `expected smoke pixels in smoke cell, got ${smokeCellDark}`);
+    assert.ok(heatedWall > 1500, `expected wall temperature tint, got ${heatedWall}`);
     assert.ok(changed > 20, `expected tracer draw to change pixels, got ${changed}`);
   } finally {
     solid.destroy();
@@ -282,6 +318,9 @@ test('VGPU field and tracer render produce distinct wall, heat/smoke and particl
     raw.destroy();
     charMass.destroy();
     ash.destroy();
+    wallInnerTemperature.destroy();
+    wallOuterTemperature.destroy();
+    wallThermal.destroy();
     renderState.destroy();
     tracers.destroy();
     // Offscreen targets are released with the owning VGPU instance. The
