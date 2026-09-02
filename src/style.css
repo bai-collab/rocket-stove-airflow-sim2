@@ -46,8 +46,19 @@ h2 { font-size: 17px; margin-bottom: 12px; }
 .dot.heat { background: #f97316; }
 .dot.smoke { background: #374151; }
 .box { border-radius: 2px; }
-.box.wall { background: #8b5e3c; }
-.box.fuel { background: #8a5a2b; }
+.box.wall { background: #a65f47; }
+.box.fuel { background: #e8be42; }
+.fuel-status { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; padding: 11px 12px; border: 1px solid #e8d08a; border-radius: 10px; background: #fffaf0; color: #713f12; }
+.fuel-status-dot { flex: 0 0 auto; width: 11px; height: 11px; margin-top: 3px; border-radius: 50%; background: #e8be42; box-shadow: 0 0 0 3px rgba(232,190,66,.2); }
+.fuel-status strong, .fuel-status small { display: block; }
+.fuel-status strong { font-size: 14px; }
+.fuel-status small { margin-top: 3px; color: #8a5a20; font-size: 11px; line-height: 1.45; }
+.fuel-status[data-phase="burning"] { border-color: #fb923c; background: #fff7ed; color: #9a3412; }
+.fuel-status[data-phase="burning"] .fuel-status-dot { background: #f97316; box-shadow: 0 0 0 3px rgba(249,115,22,.2); }
+.fuel-status[data-phase="burning"] small { color: #c2410c; }
+.fuel-status[data-phase="extinguished"] { border-color: #aeb5b1; background: #f1f3f1; color: #46504a; }
+.fuel-status[data-phase="extinguished"] .fuel-status-dot { background: #69736d; box-shadow: 0 0 0 3px rgba(105,115,109,.16); }
+.fuel-status[data-phase="extinguished"] small { color: #5f6b63; }
 .preset-panel { padding: 12px 2px 2px; }
 .preset-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .preset-grid button { text-align: left; min-height: 74px; }

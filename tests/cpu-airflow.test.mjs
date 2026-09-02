@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  AMBIENT_T,
   CpuRocketSimulation,
   DT,
   NX,
@@ -30,6 +31,19 @@ test('ignited straw is finite and raw straw decreases after heating', () => {
   assert.ok(after < before, `expected raw straw to decrease: ${before} -> ${after}`);
   assert.ok(after >= 0);
   assert.ok(Math.abs(sim.diagnostics().organicError) < 1e-4, `organic ledger drifted: ${sim.diagnostics().organicError}`);
+});
+
+test('ignited straw remains in the burning phase after starter heat ends', () => {
+  const sim = new CpuRocketSimulation();
+  sim.loadPreset('straight');
+  sim.ignite();
+  run(sim, 180);
+  const d = sim.diagnostics();
+  assert.equal(d.fuelPhase, 'burning');
+  assert.ok(d.fuelTemperature > 300, `expected hot fuel zone, got ${d.fuelTemperature}`);
+
+  sim.temperature.fill(AMBIENT_T);
+  assert.equal(sim.diagnostics().fuelPhase, 'extinguished');
 });
 
 test('fuel editing updates the baseline without duplicating mass', () => {

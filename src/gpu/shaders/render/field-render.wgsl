@@ -56,7 +56,7 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
   let i = cell_index(px);
 
   if (solid[i] != 0u) {
-    return vec4f(0.545, 0.369, 0.235, 1.0);
+    return vec4f(0.651, 0.373, 0.278, 1.0);
   }
 
   var color = vec3f(0.973, 0.980, 0.988);
@@ -79,8 +79,8 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
     if (total > 1e-7) {
       let char_ratio = c / total;
       let ash_ratio = a / total;
-      var fuel_color = mix(vec3f(0.64, 0.39, 0.17), vec3f(0.08, 0.075, 0.07), char_ratio);
-      fuel_color = mix(fuel_color, vec3f(0.55, 0.54, 0.52), ash_ratio);
+      var fuel_color = mix(vec3f(0.91, 0.745, 0.259), vec3f(0.08, 0.075, 0.07), char_ratio);
+      fuel_color = mix(fuel_color, vec3f(0.64, 0.635, 0.60), ash_ratio);
       color = fuel_color;
     }
   }

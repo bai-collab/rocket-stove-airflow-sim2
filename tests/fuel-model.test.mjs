@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createFuelState,
+  getFuelPhase,
   fuelDiagnostics,
   stepFuelModel,
 } from '../src/physics/fuel-model.mjs';
@@ -11,6 +12,50 @@ function run(state, seconds, env) {
   for (let t = 0; t < seconds; t += dt) stepFuelModel(state, dt, env);
   return state;
 }
+
+test('fuel phase distinguishes unlit, sustained burning, and extinguished fuel', () => {
+  assert.equal(getFuelPhase({ rawStraw: 1 }), 'unlit');
+  assert.equal(getFuelPhase({
+    ignited: true,
+    ignitionRemaining: 0,
+    rawStraw: 0.4,
+    char: 0.1,
+    volatileGas: 0.2,
+    oxygen: 0.8,
+    temperature: 420,
+  }), 'burning');
+  assert.equal(getFuelPhase({
+    ignited: true,
+    ignitionRemaining: 0,
+    rawStraw: 0.4,
+    char: 0.1,
+    volatileGas: 0.2,
+    oxygen: 0.02,
+    temperature: 420,
+  }), 'extinguished');
+  assert.equal(getFuelPhase({
+    ignited: true,
+    ignitionRemaining: 0,
+    rawStraw: 0,
+    char: 0,
+    volatileGas: 0,
+    oxygen: 1,
+    temperature: 600,
+  }), 'extinguished');
+});
+
+test('straw reaction continues after the temporary starter heat ends', () => {
+  const s = createFuelState();
+  const dt = 0.02;
+  for (let t = 0; t < 2.6; t += dt) {
+    stepFuelModel(s, dt, { ignitionActive: true, mixing: 1, residenceTime: 1 });
+  }
+  const rawAfterStarter = s.rawStraw;
+  for (let t = 0; t < 2; t += dt) {
+    stepFuelModel(s, dt, { ignitionActive: false, mixing: 1, residenceTime: 1 });
+  }
+  assert.ok(s.rawStraw < rawAfterStarter);
+});
 
 test('cold straw does not significantly pyrolyze', () => {
   const s = createFuelState({ temperature: 80, oxygen: 1 });

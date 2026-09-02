@@ -37,6 +37,48 @@ export const DEFAULT_FUEL_PARAMS = Object.freeze({
   ashExposurePerCharOxidized: 0.18,
 });
 
+export const FUEL_PHASES = Object.freeze({
+  UNLIT: 'unlit',
+  BURNING: 'burning',
+  EXTINGUISHED: 'extinguished',
+});
+
+const ACTIVE_FUEL_EPSILON = 1e-4;
+
+/**
+ * Derive the visible fuel phase from the physical quantities already tracked
+ * by Physics v3. The starter flame is only a temporary heat source; it does
+ * not define how long the fuel can keep reacting.
+ */
+export function getFuelPhase({
+  ignited = false,
+  ignitionRemaining = 0,
+  rawStraw = 0,
+  char = 0,
+  volatileGas = 0,
+  oxygen = 0,
+  temperature = Number(DEFAULT_FUEL_PARAMS.ambientTemperature),
+} = {}) {
+  if (!ignited) return FUEL_PHASES.UNLIT;
+
+  const reactiveFuel =
+    Math.max(0, rawStraw) + Math.max(0, char) + Math.max(0, volatileGas);
+  if (reactiveFuel <= ACTIVE_FUEL_EPSILON) return FUEL_PHASES.EXTINGUISHED;
+  if (ignitionRemaining > 0) return FUEL_PHASES.BURNING;
+
+  const volatileBurning =
+    volatileGas > ACTIVE_FUEL_EPSILON &&
+    temperature >= DEFAULT_FUEL_PARAMS.volatileBurnStartTemperature;
+  const charBurning =
+    char > ACTIVE_FUEL_EPSILON &&
+    temperature >= DEFAULT_FUEL_PARAMS.charOxidationStartTemperature;
+  const oxygenAvailable = oxygen >= 0.06;
+
+  return oxygenAvailable && (volatileBurning || charBurning)
+    ? FUEL_PHASES.BURNING
+    : FUEL_PHASES.EXTINGUISHED;
+}
+
 export function createFuelState({
   rawStraw = 1,
   mineralMatter = 0.12,

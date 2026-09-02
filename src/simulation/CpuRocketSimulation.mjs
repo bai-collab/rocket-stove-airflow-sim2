@@ -2,6 +2,7 @@ import { BUILD_CELL, STOVE_PRESETS } from './presets.mjs';
 import {
   DEFAULT_FUEL_PARAMS,
   createFuelState,
+  getFuelPhase,
   stepPrimaryFuelModel,
   stepSecondarySmokeOxidation,
 } from '../physics/fuel-model.mjs';
@@ -853,6 +854,7 @@ export class CpuRocketSimulation {
     let speed = 0;
     let fluidCells = 0;
     let fuelO2 = 0;
+    let fuelTemperature = 0;
     let fuelCells = 0;
     for (let i = 0; i < N; i += 1) {
       if (!this.solid[i]) {
@@ -861,6 +863,7 @@ export class CpuRocketSimulation {
       }
       if (this.fuelMask[i]) {
         fuelO2 += this.oxygen[i];
+        fuelTemperature += this.temperature[i];
         fuelCells += 1;
       }
     }
@@ -883,6 +886,18 @@ export class CpuRocketSimulation {
     // advection would double-count the same reacted material.
     const organicAccounted = raw + char + volatile + smoke + this.exhaustTotal + this.smokeOutTotal + this.volatileOutTotal;
     const mineralAccounted = mineral + ash;
+    const averageFuelTemperature = fuelCells
+      ? fuelTemperature / fuelCells
+      : AMBIENT_T;
+    const fuelPhase = getFuelPhase({
+      ignited: this.ignited,
+      ignitionRemaining: this.ignitionRemaining,
+      rawStraw: raw,
+      char,
+      volatileGas: volatile,
+      oxygen: fuelCells ? fuelO2 / fuelCells : 0,
+      temperature: averageFuelTemperature,
+    });
 
     return {
       time: this.time,
@@ -895,6 +910,9 @@ export class CpuRocketSimulation {
       exhaustGas: exhaustInDomain,
       averageSpeed: fluidCells ? speed / fluidCells : 0,
       fuelOxygen: fuelCells ? fuelO2 / fuelCells : 0,
+      fuelTemperature: averageFuelTemperature,
+      fuelPhase,
+      reactiveFuel: raw + char + volatile,
       averageTemperature: this.average(this.temperature),
       smokeOut: this.smokeOutTotal,
       volatileOut: this.volatileOutTotal,

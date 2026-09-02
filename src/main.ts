@@ -14,6 +14,7 @@ import {
   type BackendStatus,
 } from './simulation/BrowserSimulationController';
 import { BUILD_CELL, STOVE_PRESETS } from './simulation/presets.mjs';
+import { getFuelPhase } from './physics/fuel-model.mjs';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -64,8 +65,8 @@ app.innerHTML = `
           <span><i class="dot air"></i>藍：空氣 tracer</span>
           <span><i class="dot heat"></i>橘：高溫區</span>
           <span><i class="dot smoke"></i>黑灰：相對黑煙</span>
-          <span><i class="box fuel"></i>黃褐→黑：稻稈→炭</span>
-          <span><i class="box wall"></i>磚牆</span>
+          <span><i class="box fuel"></i>金黃→深灰：稻稈→炭；火焰＝燃燒中</span>
+          <span><i class="box wall"></i>紅褐：磚牆</span>
         </div>
       </aside>
 
@@ -84,6 +85,13 @@ app.innerHTML = `
 
       <aside class="panel metrics-panel">
         <h2>3. 觀察結果</h2>
+        <div id="fuel-status" class="fuel-status" data-phase="unlit" role="status" aria-live="polite">
+          <span class="fuel-status-dot" aria-hidden="true"></span>
+          <div>
+            <strong id="fuel-status-label">未點火</strong>
+            <small id="fuel-status-detail">按「點火」開始觀察稻稈燃燒。</small>
+          </div>
+        </div>
         <div id="metrics" class="metrics"></div>
         <details open>
           <summary>進階診斷</summary>
@@ -99,6 +107,9 @@ const simStack = document.querySelector<HTMLDivElement>('#sim-stack')!;
 const gpuCanvas = document.querySelector<HTMLCanvasElement>('#gpu-canvas')!;
 const canvas = document.querySelector<HTMLCanvasElement>('#sim-canvas')!;
 const ctx = canvas.getContext('2d')!;
+const fuelStatus = document.querySelector<HTMLDivElement>('#fuel-status')!;
+const fuelStatusLabel = document.querySelector<HTMLElement>('#fuel-status-label')!;
+const fuelStatusDetail = document.querySelector<HTMLElement>('#fuel-status-detail')!;
 const metrics = document.querySelector<HTMLDivElement>('#metrics')!;
 const advanced = document.querySelector<HTMLDivElement>('#advanced')!;
 const feedback = document.querySelector<HTMLDivElement>('#feedback')!;
@@ -143,8 +154,178 @@ function metric(label: string, value: string) {
   return `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`;
 }
 
+type FuelPhase = 'unlit' | 'burning' | 'extinguished';
+type FuelRegion = {
+  raw: number;
+  char: number;
+  ash: number;
+  volatileGas: number;
+  temperature: number;
+  oxygen: number;
+};
+
+const FUEL_PHASE_META: Record<FuelPhase, { label: string }> = {
+  unlit: { label: '未點火' },
+  burning: { label: '燃燒中' },
+  extinguished: { label: '熄滅' },
+};
+
+const STRAW_RGB = [232, 190, 66] as const;
+const CHAR_RGB = [47, 43, 38] as const;
+const ASH_RGB = [163, 162, 153] as const;
+const EXTINGUISHED_RGB = [105, 112, 108] as const;
+
+function clampUnit(value: number) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function mixRgb(a: readonly number[], b: readonly number[], amount: number) {
+  const t = clampUnit(amount);
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * t),
+    Math.round(a[1] + (b[1] - a[1]) * t),
+    Math.round(a[2] + (b[2] - a[2]) * t),
+  ];
+}
+
+function rgbCss(color: readonly number[]) {
+  return `rgb(${color[0]} ${color[1]} ${color[2]})`;
+}
+
+function asFuelPhase(value: unknown): FuelPhase {
+  return value === 'burning' || value === 'extinguished' ? value : 'unlit';
+}
+
+function readFuelRegion(fuel: { x: number; y: number }): FuelRegion {
+  const gx0 = Math.floor(fuel.x / H);
+  const gy0 = Math.floor(fuel.y / H);
+  let raw = 0;
+  let char = 0;
+  let ash = 0;
+  let volatileGas = 0;
+  let temperature = 0;
+  let oxygen = 0;
+  let cells = 0;
+
+  for (let gy = gy0; gy < Math.min(NY, gy0 + 2); gy += 1) {
+    for (let gx = gx0; gx < Math.min(NX, gx0 + 2); gx += 1) {
+      const i = gy * NX + gx;
+      if (!sim.fuelMask[i]) continue;
+      raw += sim.rawStraw[i];
+      char += sim.char[i];
+      ash += sim.ash[i];
+      volatileGas += sim.volatileGas[i];
+      temperature += sim.temperature[i];
+      oxygen += sim.oxygen[i];
+      cells += 1;
+    }
+  }
+
+  return {
+    raw,
+    char,
+    ash,
+    volatileGas,
+    temperature: cells ? temperature / cells : AMBIENT_T,
+    oxygen: cells ? oxygen / cells : 0,
+  };
+}
+
+function fuelPhaseForRegion(region: FuelRegion): FuelPhase {
+  return asFuelPhase(getFuelPhase({
+    ignited: sim.ignited,
+    ignitionRemaining: sim.ignitionRemaining,
+    rawStraw: region.raw,
+    char: region.char,
+    volatileGas: region.volatileGas,
+    oxygen: region.oxygen,
+    temperature: region.temperature,
+  }));
+}
+
+function fuelBlockColor(region: FuelRegion, phase: FuelPhase) {
+  const organic = Math.max(0, region.raw) + Math.max(0, region.char);
+  const total = organic + Math.max(0, region.ash);
+  if (total <= 1e-6) return rgbCss(phase === 'extinguished' ? EXTINGUISHED_RGB : ASH_RGB);
+
+  const charRatio = organic > 1e-6 ? region.char / organic : 1;
+  let color = mixRgb(STRAW_RGB, CHAR_RGB, charRatio);
+  color = mixRgb(color, ASH_RGB, region.ash / total);
+  if (phase === 'extinguished') color = mixRgb(color, EXTINGUISHED_RGB, 0.32);
+  return rgbCss(color);
+}
+
+function drawFuelFlame(fuel: { x: number; y: number }, region: FuelRegion, now: number) {
+  const thermalIntensity = clampUnit((region.temperature - 150) / 470);
+  const gasIntensity = clampUnit(region.volatileGas * 5 + region.raw * 0.12);
+  const intensity = Math.max(0.35, thermalIntensity, gasIntensity);
+  const pulse = 0.92 + 0.08 * Math.sin(now * 0.012 + fuel.x * 0.04 + fuel.y * 0.02);
+  const height = (10 + 16 * intensity) * pulse;
+  const centerX = fuel.x + BUILD_CELL / 2;
+  const baseY = fuel.y + 6;
+
+  ctx.save();
+  ctx.globalAlpha = 0.86;
+  ctx.fillStyle = '#f97316';
+  ctx.beginPath();
+  ctx.moveTo(centerX, baseY - height);
+  ctx.quadraticCurveTo(centerX + 10, baseY - height + 8, centerX + 7, baseY);
+  ctx.lineTo(centerX - 7, baseY);
+  ctx.quadraticCurveTo(centerX - 10, baseY - height + 8, centerX, baseY - height);
+  ctx.fill();
+
+  const innerHeight = height * 0.56;
+  ctx.globalAlpha = 0.92;
+  ctx.fillStyle = '#ffd166';
+  ctx.beginPath();
+  ctx.moveTo(centerX, baseY - innerHeight);
+  ctx.quadraticCurveTo(centerX + 5, baseY - innerHeight + 6, centerX + 4, baseY);
+  ctx.lineTo(centerX - 4, baseY);
+  ctx.quadraticCurveTo(centerX - 5, baseY - innerHeight + 6, centerX, baseY - innerHeight);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawFuelBlock(fuel: { x: number; y: number }, region: FuelRegion, phase: FuelPhase, now: number) {
+  ctx.fillStyle = fuelBlockColor(region, phase);
+  ctx.fillRect(fuel.x + 3, fuel.y + 3, BUILD_CELL - 6, BUILD_CELL - 6);
+  ctx.lineWidth = phase === 'burning' ? 2 : 1;
+  ctx.strokeStyle = phase === 'burning'
+    ? '#9a5a0b'
+    : phase === 'extinguished'
+      ? '#626862'
+      : '#806016';
+  ctx.setLineDash(phase === 'extinguished' ? [4, 3] : []);
+  ctx.strokeRect(fuel.x + 3.5, fuel.y + 3.5, BUILD_CELL - 7, BUILD_CELL - 7);
+  ctx.setLineDash([]);
+  ctx.lineWidth = 1;
+  if (phase === 'burning') drawFuelFlame(fuel, region, now);
+}
+
+function renderFuelStatus(d: ReturnType<typeof sim.diagnostics>) {
+  const phase = asFuelPhase(d.fuelPhase);
+  const reactiveFuel = d.reactiveFuel ?? d.rawStraw + d.char + d.volatileGas;
+  fuelStatus.dataset.phase = phase;
+  fuelStatusLabel.textContent = FUEL_PHASE_META[phase].label;
+
+  if (!sim.fuels.length) {
+    fuelStatusDetail.textContent = '尚未放置稻稈；請選擇「稻稈燃料」後點擊畫布。';
+  } else if (phase === 'unlit') {
+    fuelStatusDetail.textContent = '燃料尚未受熱，按「點火」開始反應。';
+  } else if (phase === 'burning') {
+    fuelStatusDetail.textContent = `燃料區約 ${d.fuelTemperature.toFixed(0)} °C；熱與氧氣足夠，稻稈會持續轉化。`;
+  } else if (reactiveFuel > 0.001 && d.fuelOxygen < 0.06) {
+    fuelStatusDetail.textContent = '火焰已熄滅：燃料仍在，但燃料區氧氣不足。';
+  } else if (reactiveFuel > 0.001) {
+    fuelStatusDetail.textContent = `火焰已熄滅：燃料區約 ${d.fuelTemperature.toFixed(0)} °C，未達持續燃燒條件。`;
+  } else {
+    fuelStatusDetail.textContent = '可燃物已大致耗盡；可重新載入爐型或再放置稻稈。';
+  }
+}
+
 function interpret(d: ReturnType<typeof sim.diagnostics>) {
   if (!sim.ignited) return '先按「點火」，再觀察高溫煙氣是否能建立自然上升流。';
+  if (d.fuelPhase === 'extinguished') return '目前火焰已熄滅；檢查燃料區是否仍有足夠熱量與氧氣。';
   if (d.pyrolysisFraction < 0.08 && d.time > 3) return '稻稈熱裂解仍低：可檢查燃料是否被爐體阻隔、或高溫區是否建立。';
   if (d.fuelOxygen < 0.16 && d.charRetention > 0.65) return '目前偏碳化／保炭：燃料附近缺氧，生成的炭較多被保留下來。';
   if (d.smoke > 0.08 && d.secondaryRate < 0.001) return '目前偏不完全燃燒：黑煙較多，但二次燃燒條件不足。';
@@ -155,9 +336,11 @@ function interpret(d: ReturnType<typeof sim.diagnostics>) {
 
 function renderMetrics() {
   const d = sim.diagnostics();
+  renderFuelStatus(d);
   metrics.innerHTML = [
     metric('平均氣流速度', `${d.averageSpeed.toFixed(1)} px/s`),
     metric('燃料區相對氧氣', `${(d.fuelOxygen * 100).toFixed(0)}%`),
+    metric('燃料區溫度', `${d.fuelTemperature.toFixed(0)} °C`),
     metric('相對黑煙量', d.smoke.toFixed(3)),
     metric('黑煙排出累積', d.smokeOut.toFixed(3)),
     metric('熱裂解比例', `${(d.pyrolysisFraction * 100).toFixed(1)}%`),
@@ -253,34 +436,16 @@ function drawCpuField() {
   }
 
   for (const wall of sim.walls) {
-    ctx.fillStyle = '#8b5e3c';
+    ctx.fillStyle = '#a65f47';
     ctx.fillRect(wall.x + 1, wall.y + 1, BUILD_CELL - 2, BUILD_CELL - 2);
-    ctx.strokeStyle = '#5f3f29';
+    ctx.strokeStyle = '#713f2f';
     ctx.strokeRect(wall.x + 1.5, wall.y + 1.5, BUILD_CELL - 3, BUILD_CELL - 3);
   }
 
+  const now = performance.now();
   for (const fuel of sim.fuels) {
-    const gx0 = Math.floor(fuel.x / H);
-    const gy0 = Math.floor(fuel.y / H);
-    let raw = 0;
-    let char = 0;
-    let ash = 0;
-    for (let gy = gy0; gy < Math.min(NY, gy0 + 2); gy += 1) {
-      for (let gx = gx0; gx < Math.min(NX, gx0 + 2); gx += 1) {
-        const i = gy * NX + gx;
-        raw += sim.rawStraw[i];
-        char += sim.char[i];
-        ash += sim.ash[i];
-      }
-    }
-    const total = raw + char + ash;
-    const charRatio = total > 1e-6 ? char / total : 0;
-    const ashRatio = total > 1e-6 ? ash / total : 0;
-    const light = Math.max(16, 54 - charRatio * 34 + ashRatio * 20);
-    ctx.fillStyle = `hsl(30 45% ${light}%)`;
-    ctx.fillRect(fuel.x + 3, fuel.y + 3, BUILD_CELL - 6, BUILD_CELL - 6);
-    ctx.strokeStyle = '#3f2a1d';
-    ctx.strokeRect(fuel.x + 3.5, fuel.y + 3.5, BUILD_CELL - 7, BUILD_CELL - 7);
+    const region = readFuelRegion(fuel);
+    drawFuelBlock(fuel, region, fuelPhaseForRegion(region), now);
   }
 
   drawGrid();
@@ -291,12 +456,12 @@ function drawGpuOverlay() {
   drawGrid();
   ctx.lineWidth = 1;
   for (const wall of sim.walls) {
-    ctx.strokeStyle = 'rgba(63, 42, 29, 0.72)';
+    ctx.strokeStyle = 'rgba(113, 63, 47, 0.78)';
     ctx.strokeRect(wall.x + 1.5, wall.y + 1.5, BUILD_CELL - 3, BUILD_CELL - 3);
   }
   for (const fuel of sim.fuels) {
-    ctx.strokeStyle = 'rgba(63, 42, 29, 0.68)';
-    ctx.strokeRect(fuel.x + 3.5, fuel.y + 3.5, BUILD_CELL - 7, BUILD_CELL - 7);
+    const region = readFuelRegion(fuel);
+    drawFuelBlock(fuel, region, fuelPhaseForRegion(region), performance.now());
   }
 }
 
