@@ -8,10 +8,16 @@ type TutorReply = {
   relatedMetrics: string[];
 };
 
+export type ClassGoal = { id: string; label: string; hint: string };
+export type TutorServiceStatus = { available: boolean; goal: ClassGoal | null };
+
 type TutorPanelOptions = {
   openButton: HTMLButtonElement;
   getContext: () => unknown;
+  /** Valid student id, or null after asking the student to enter one. */
+  requireStudentId: () => string | null;
   onHighlight: (highlight: TutorHighlight | null) => void;
+  onServiceStatus: (status: TutorServiceStatus) => void;
 };
 
 type Availability = 'checking' | 'available' | 'unavailable';
@@ -32,7 +38,9 @@ const UNAVAILABLE_NOTE = '設計導師需要本機服務版：在專案資料夾
  * cells/metrics; it never places bricks or presses buttons for the student.
  * All tutor and student text is rendered with textContent.
  */
-export function createTutorPanel({ openButton, getContext, onHighlight }: TutorPanelOptions) {
+export function createTutorPanel({
+  openButton, getContext, requireStudentId, onHighlight, onServiceStatus,
+}: TutorPanelOptions) {
   const panel = document.createElement('section');
   panel.className = 'tutor-window';
   panel.hidden = true;
@@ -176,7 +184,7 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
     setHighlightVisible(!minimized && lastHighlight !== null);
   }
 
-  async function ask(question: string) {
+  async function ask(question: string, studentId: string) {
     pending?.abort();
     const controller = new AbortController();
     const askedMode = mode;
@@ -193,6 +201,7 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mode: askedMode,
+          studentId,
           question,
           context: getContext(),
           history: askedMode === 'model' ? history : [],
@@ -236,8 +245,13 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
       return;
     }
     if (availability !== 'available' || pending) return;
+    const studentId = requireStudentId();
+    if (!studentId) {
+      note.textContent = '請先在畫面上方輸入學生代號，再向導師提問。';
+      return;
+    }
     addEntry('student', [['', question]]);
-    void ask(question);
+    void ask(question, studentId);
   });
 
   textarea.addEventListener('keydown', (event) => {
@@ -288,6 +302,7 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
   async function detectService() {
     if (!/^https?:$/.test(location.protocol)) {
       availability = 'unavailable';
+      onServiceStatus({ available: false, goal: null });
       refreshControls();
       return;
     }
@@ -296,9 +311,12 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
       const data = response.ok ? await response.json() : null;
       availability = data?.ok === true && data.modes?.mock === true ? 'available' : 'unavailable';
       modelAvailable = availability === 'available' && data.modes.model === true;
+      const goal = availability === 'available' && data.goal && typeof data.goal.label === 'string' ? data.goal as ClassGoal : null;
+      onServiceStatus({ available: availability === 'available', goal });
     } catch {
       availability = 'unavailable';
       modelAvailable = false;
+      onServiceStatus({ available: false, goal: null });
     }
     setMode(readStoredMode());
   }
@@ -308,6 +326,8 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
   void detectService();
 
   return {
+    /** Re-read service status, e.g. after a teacher changed the class goal. */
+    refreshService: () => detectService(),
     /** The design changed, so earlier cell references may no longer match. */
     designChanged() {
       if (lastHighlight === null) return;

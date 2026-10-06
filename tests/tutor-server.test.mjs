@@ -14,7 +14,8 @@ await fs.writeFile(path.join(staticDir, 'assets', 'app.js'), 'export {};');
 await fs.writeFile(path.join(staticDir, '.env'), 'SECRET=1');
 await fs.writeFile(path.join(path.dirname(staticDir), 'outside.txt'), 'outside');
 
-const server = await createTutorServer({ port: 0, staticDir, settingsFile: path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'tutor-settings-')), 'settings.json') });
+const server = await createTutorServer({ port: 0, staticDir, settingsFile: path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'tutor-settings-')), 'settings.json'),
+  recordsFile: path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'tutor-records-')), 'events.jsonl') });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const { port } = server.address();
 const base = `http://127.0.0.1:${port}`;
@@ -41,11 +42,13 @@ test('status reports mock mode only and no secrets', async () => {
   const response = await fetch(`${base}/api/tutor/status`);
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'no-store');
-  assert.deepEqual(await response.json(), { ok: true, modes: { mock: true, model: false } });
+  assert.deepEqual(await response.json(), {
+    ok: true, modes: { mock: true, model: false }, goal: { id: 'free', label: '自由探索', hint: '比較不同爐型的氧氣、黑煙與炭保留。' },
+  });
 });
 
 test('mock tutor answers with grounded guidance', async () => {
-  const response = await ask({ mode: 'mock', question: '我要怎麼開始？', context: context() });
+  const response = await ask({ mode: 'mock', studentId: 'S01', question: '我要怎麼開始？', context: context() });
   assert.equal(response.status, 200);
   const data = await response.json();
   assert.equal(data.source, 'mock');
@@ -55,16 +58,16 @@ test('mock tutor answers with grounded guidance', async () => {
 });
 
 test('model mode is refused until a teacher saves an API key', async () => {
-  const response = await ask({ mode: 'model', question: '你好', context: context() });
+  const response = await ask({ mode: 'model', studentId: 'S01', question: '你好', context: context() });
   assert.equal(response.status, 409);
   assert.equal((await response.json()).code, 'MODEL_NOT_CONFIGURED');
-  const unknown = await ask({ mode: 'magic', question: '你好', context: context() });
+  const unknown = await ask({ mode: 'magic', studentId: 'S01', question: '你好', context: context() });
   assert.equal((await unknown.json()).code, 'INVALID_MODE');
 });
 
 test('bad questions, bad context and bad JSON are rejected', async () => {
-  assert.equal((await ask({ mode: 'mock', question: '', context: context() })).status, 400);
-  assert.equal((await ask({ mode: 'mock', question: '嗨', context: { version: 9 } })).status, 400);
+  assert.equal((await ask({ mode: 'mock', studentId: 'S01', question: '', context: context() })).status, 400);
+  assert.equal((await ask({ mode: 'mock', studentId: 'S01', question: '嗨', context: { version: 9 } })).status, 400);
   assert.equal((await ask('{not json')).status, 400);
   const wrongType = await fetch(`${base}/api/tutor`, {
     method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}',
@@ -73,13 +76,13 @@ test('bad questions, bad context and bad JSON are rejected', async () => {
 });
 
 test('oversized bodies are refused', async () => {
-  const response = await ask({ mode: 'mock', question: 'x', padding: 'a'.repeat(70 * 1024) });
+  const response = await ask({ mode: 'mock', studentId: 'S01', question: 'x', padding: 'a'.repeat(70 * 1024) });
   assert.equal(response.status, 413);
 });
 
 test('cross-site and foreign-host requests are refused', async () => {
-  assert.equal((await ask({ mode: 'mock', question: '嗨', context: context() }, { Origin: 'https://evil.example' })).status, 403);
-  assert.equal((await ask({ mode: 'mock', question: '嗨', context: context() }, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
+  assert.equal((await ask({ mode: 'mock', studentId: 'S01', question: '嗨', context: context() }, { Origin: 'https://evil.example' })).status, 403);
+  assert.equal((await ask({ mode: 'mock', studentId: 'S01', question: '嗨', context: context() }, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
   const rebinding = await new Promise((resolve, reject) => {
     import('node:http').then(({ request }) => {
       const req = request({ host: '127.0.0.1', port, path: '/api/tutor/status', headers: { Host: `evil.example:${port}` } }, resolve);

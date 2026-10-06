@@ -37,3 +37,56 @@ button, input { font: inherit; }
 .teacher-info code { overflow-wrap: anywhere; }
 .teacher-warning { padding: 10px 12px; border-radius: 10px; background: #fffbeb; color: #92400e; }
 .teacher-back a { color: #9f1239; font-weight: 700; }
+body.workspace-mode .teacher-shell { width: min(1240px, calc(100% - 32px)); }
+.teacher-field select { width: 100%; min-height: 44px; padding: 9px 11px; border: 1px solid #cbd5e1; border-radius: 9px; background: white; font: inherit; }
+.workspace-tabs { display: flex; gap: 6px; margin: 4px 0 14px; border-bottom: 1px solid #e2e8f0; overflow-x: auto; }
+.workspace-tab { min-height: 44px; padding: 8px 16px; border: 0; border-bottom: 3px solid transparent; background: none; color: #475569; font: inherit; font-weight: 750; cursor: pointer; white-space: nowrap; }
+.workspace-tab[aria-selected="true"] { border-bottom-color: #be123c; color: #881337; }
+.workspace-panel form + form { margin-top: 22px; padding-top: 18px; border-top: 1px solid #e2e8f0; }
+.records-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; align-items: start; }
+.student-aside { position: sticky; top: 12px; display: grid; gap: 8px; min-width: 0; max-height: calc(100vh - 40px); }
+.records-main { min-width: 0; }
+.student-aside input { width: 100%; min-width: 0; min-height: 40px; padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 9px; font: inherit; }
+.student-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; overflow-y: auto; }
+.student-button { display: grid; width: 100%; min-height: 44px; padding: 7px 10px; border: 1px solid #e2e8f0; border-radius: 9px; background: #f8fafc; text-align: left; font: inherit; cursor: pointer; overflow-wrap: anywhere; }
+.student-button small { color: #64748b; font-size: 11px; }
+.student-button[aria-pressed="true"] { border-color: #be123c; background: #fff1f2; }
+.record-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+.record-filters select, .record-filters input { min-height: 40px; padding: 6px 9px; border: 1px solid #cbd5e1; border-radius: 9px; background: white; font: inherit; }
+.scope-note { margin: 10px 0; color: #475569; font-size: 13px; }
+.record-timeline { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.record-item { border: 1px solid #e2e8f0; border-radius: 10px; background: white; }
+.record-item summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 10px 12px; cursor: pointer; font-size: 13px; }
+.record-time { color: #64748b; font-variant-numeric: tabular-nums; }
+.record-student { font-weight: 800; color: #0f172a; }
+.record-badge { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 800; }
+.record-badge.test { background: #fff7ed; color: #9a3412; }
+.record-badge.tutor { background: #eff6ff; color: #1d4ed8; }
+.record-headline { flex: 1 1 260px; min-width: 0; color: #334155; overflow-wrap: anywhere; }
+.record-body { display: flex; flex-wrap: wrap; gap: 14px; padding: 0 12px 12px; }
+.design-map { width: 228px; max-width: 100%; height: auto; border: 1px solid #cbd5e1; border-radius: 6px; image-rendering: pixelated; }
+.record-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0; flex: 1 1 280px; font-size: 13px; }
+.record-facts dt { color: #64748b; }
+.record-facts dd { margin: 0; color: #0f172a; overflow-wrap: anywhere; white-space: pre-wrap; }
+.empty-note { color: #64748b; font-size: 13px; line-height: 1.6; padding: 8px 2px; }
+.analysis-modes { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0 0 10px; padding: 0; border: 0; font-size: 14px; }
+.analysis-modes legend { width: 100%; margin-bottom: 4px; font-weight: 750; color: #334155; }
+.analysis-modes label { display: flex; align-items: center; gap: 6px; min-height: 36px; }
+.quick-questions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.workspace-panel textarea { width: 100%; padding: 9px 11px; border: 1px solid #cbd5e1; border-radius: 9px; font: inherit; resize: vertical; margin-bottom: 10px; }
+.analysis-note { color: #64748b; font-size: 12px; line-height: 1.6; }
+.analysis-output { display: grid; gap: 12px; margin-top: 8px; }
+.analysis-source { margin: 0; color: #475569; font-size: 12px; font-weight: 700; }
+.analysis-error { color: #b91c1c; font-size: 13px; }
+.analysis-section { padding: 12px 14px; border-radius: 10px; border: 1px solid #e2e8f0; background: #f8fafc; }
+.analysis-section h3 { margin: 0 0 6px; font-size: 14px; }
+.analysis-section ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 13px; line-height: 1.6; }
+.analysis-section.interpretations { background: #fffbeb; border-color: #fde68a; }
+.analysis-section.suggestions { background: #f0fdf4; border-color: #bbf7d0; }
+.citation { margin-left: 6px; padding: 1px 8px; min-height: 26px; border: 1px solid #fda4af; border-radius: 999px; background: white; color: #9f1239; font-size: 11px; font-weight: 700; cursor: pointer; }
+.citation:focus-visible, .workspace-tab:focus-visible, .student-button:focus-visible, .record-item summary:focus-visible { outline: 3px solid #fb7185; outline-offset: 2px; }
+@media (max-width: 760px) {
+  .records-layout { grid-template-columns: 1fr; }
+  .student-aside { position: static; max-height: none; }
+  .student-list { grid-auto-flow: column; grid-auto-columns: minmax(140px, max-content); overflow-x: auto; }
+}

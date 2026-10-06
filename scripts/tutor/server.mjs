@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { CLASS_GOALS, summarizeRun } from '../../src/tutor/goals.mjs';
 import { mockTutorReply } from '../../src/tutor/mock-tutor.mjs';
 import {
   groundTutorReply,
@@ -14,12 +15,15 @@ import {
   sanitizeStoveContext,
 } from '../../src/tutor/stove-context.mjs';
 import { ProviderError, providerConfig, requestModelGuidance } from './nmking.mjs';
+import { RecordError, cleanStudentId, designOf, endReason, openRecordStore } from './record-store.mjs';
+import { AnalysisError, localAnalysis, modelAnalysis, selectRecords } from './teacher-analysis.mjs';
 import { SettingsError, openTeacherConfig } from './teacher-config.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const DEFAULT_PORT = 8620;
 export const DEFAULT_STATIC_DIR = path.join(ROOT, 'dist-tutor');
 export const DEFAULT_SETTINGS_FILE = path.join(ROOT, 'local-data', 'teacher-settings.json');
+export const DEFAULT_RECORDS_FILE = path.join(ROOT, 'local-data', 'records', 'events.jsonl');
 const HOST = '127.0.0.1';
 const MAX_BODY_BYTES = 64 * 1024;
 const SESSION_COOKIE = 'stove_teacher';
@@ -28,6 +32,10 @@ const LOGIN_MAX_FAILURES = 5;
 const LOGIN_LOCK_MS = 60 * 1000;
 const MODEL_TIMEOUT_MS = 90 * 1000;
 const DEFAULT_MODEL_PER_MINUTE = 6;
+const ANALYSIS_TIMEOUT_MS = 150 * 1000;
+const RECORD_WRITES_PER_MINUTE = 60;
+const MIN_TEST_SECONDS = 5;
+const TEACHER_RECORD_LIMIT = 2000;
 
 const CONTENT_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -74,6 +82,11 @@ const ERRORS = {
   LOGIN_FAILED: [401, '密碼不正確。'],
   LOGIN_LOCKED: [429, '密碼錯誤太多次，請 1 分鐘後再試。'],
   UNAUTHORIZED: [401, '請先登入教師設定。'],
+  INVALID_STUDENT_ID: [400, '請先在畫面上方輸入學生代號（1～20 個中英文、數字、底線或連字號）。'],
+  TEST_TOO_SHORT: [400, '這次測試太短，沒有記錄。'],
+  RECORDS_BUSY: [429, '紀錄寫入太頻繁，請稍後再試。'],
+  INVALID_SELECTION: [400, '請選擇 1～100 筆有效紀錄再分析。'],
+  ANALYSIS_BUSY: [429, '上一個 AI 分析還在進行，請等它完成。'],
 };
 
 class RequestError extends Error {
@@ -198,18 +211,34 @@ export async function createTutorServer({
   port = DEFAULT_PORT,
   staticDir = DEFAULT_STATIC_DIR,
   settingsFile = DEFAULT_SETTINGS_FILE,
+  recordsFile = DEFAULT_RECORDS_FILE,
   env = process.env,
   fetchImpl = fetch,
   now = Date.now,
 } = {}) {
   const root = path.resolve(staticDir);
   const settings = await openTeacherConfig(settingsFile);
+  const store = await openRecordStore(recordsFile, { now });
   const aiConfig = providerConfig(env);
   const perMinute = Number.parseInt(env.TUTOR_AI_PER_MINUTE ?? '', 10) || DEFAULT_MODEL_PER_MINUTE;
   const sessions = new Map();
   const login = { failures: 0, lockedUntil: 0 };
   let modelInFlight = false;
   let modelCalls = [];
+  let recordWrites = [];
+  let analysisInFlight = false;
+
+  function goalInfo() {
+    const goal = CLASS_GOALS[settings.goal()];
+    return { id: goal.id, label: goal.label, hint: goal.hint };
+  }
+
+  function takeRecordSlot() {
+    const minuteAgo = now() - 60_000;
+    recordWrites = recordWrites.filter((time) => time > minuteAgo);
+    if (recordWrites.length >= RECORD_WRITES_PER_MINUTE) throw new RequestError('RECORDS_BUSY');
+    recordWrites.push(now());
+  }
 
   function sessionCookie(token, maxAgeSeconds) {
     return `${SESSION_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/api/teacher; Max-Age=${maxAgeSeconds}`;
@@ -232,8 +261,8 @@ export async function createTutorServer({
     return token;
   }
 
-  function teacherState(req) {
-    return { ...settings.status(), loggedIn: Boolean(currentSession(req)) };
+  function teacherState(req, loggedIn = Boolean(currentSession(req))) {
+    return { ...settings.status(), goal: settings.goal(), loggedIn };
   }
 
   async function modelReply(req, res, context, question, history) {
@@ -253,7 +282,8 @@ export async function createTutorServer({
     res.on('close', onClose);
     try {
       return await requestModelGuidance({
-        apiKey, context, question, history, signal: controller.signal, config: aiConfig, fetchImpl,
+        apiKey, context, question, history, goal: CLASS_GOALS[settings.goal()],
+        signal: controller.signal, config: aiConfig, fetchImpl,
       });
     } finally {
       clearTimeout(timer);
@@ -268,25 +298,112 @@ export async function createTutorServer({
     if (body?.mode !== 'mock' && body?.mode !== 'model') throw new RequestError('INVALID_MODE');
     let question;
     let context;
+    let studentId;
     try {
+      studentId = cleanStudentId(body.studentId);
       question = sanitizeQuestion(body.question);
       context = sanitizeStoveContext(body.context);
     } catch (error) {
-      throw new RequestError(error.message);
+      throw new RequestError(error.code ?? error.message);
     }
+    const base = { type: 'tutor', studentId, goal: settings.goal(), mode: body.mode, question, design: designOf(context) };
+    const save = (fields) => store.append({ ...base, ...fields }).catch((error) => {
+      console.error('Could not save tutor record', error);
+    });
+
     if (body.mode === 'mock') {
-      const reply = groundTutorReply(mockTutorReply(context, question), context);
+      const reply = groundTutorReply(mockTutorReply(context, question, settings.goal()), context);
+      await save({ status: 'completed', guidance: reply.guidance, followup: reply.question, relatedMetrics: reply.relatedMetrics });
       json(res, 200, { source: 'mock', reply });
       return;
     }
-    const reply = await modelReply(req, res, context, question, sanitizeHistory(body.history));
+    let reply;
+    try {
+      reply = await modelReply(req, res, context, question, sanitizeHistory(body.history));
+    } catch (error) {
+      // Only calls that actually reached the AI service are logged as failures.
+      if (error instanceof ProviderError) await save({ status: 'failed', errorCode: error.code });
+      throw error;
+    }
+    await save({ status: 'completed', guidance: reply.guidance, followup: reply.question, relatedMetrics: reply.relatedMetrics });
     json(res, 200, { source: 'model', reply });
+  }
+
+  async function handleRecord(req, res) {
+    const body = await bodyOrReply(req, res);
+    if (body === undefined) return;
+    let studentId;
+    let context;
+    try {
+      studentId = cleanStudentId(body?.studentId);
+      context = sanitizeStoveContext(body?.context);
+    } catch (error) {
+      throw new RequestError(error.code ?? error.message);
+    }
+    const summary = summarizeRun(context);
+    if (!context.run.ignited || summary.durationSec < MIN_TEST_SECONDS) throw new RequestError('TEST_TOO_SHORT');
+    takeRecordSlot();
+    const record = await store.append({
+      type: 'test', studentId, goal: settings.goal(), endReason: endReason(body.endReason),
+      backend: context.run.backend, design: designOf(context), summary,
+    });
+    json(res, 200, { saved: true, id: record.id });
+  }
+
+  async function handleAnalyze(req, res) {
+    const body = await bodyOrReply(req, res);
+    if (body === undefined) return;
+    const records = selectRecords(store.all(), body?.recordIds);
+    if (body.mode === 'local') {
+      json(res, 200, { source: 'local', result: localAnalysis(records) });
+      return;
+    }
+    if (body.mode !== 'model') throw new RequestError('INVALID_MODE');
+    let question;
+    try {
+      question = sanitizeQuestion(body.question);
+    } catch (error) {
+      throw new RequestError(error.message);
+    }
+    const apiKey = settings.apiKey();
+    if (!apiKey) throw new RequestError('MODEL_NOT_CONFIGURED');
+    if (analysisInFlight) throw new RequestError('ANALYSIS_BUSY');
+    analysisInFlight = true;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ANALYSIS_TIMEOUT_MS);
+    const onClose = () => { if (!res.writableEnded) controller.abort(); };
+    res.on('close', onClose);
+    try {
+      const result = await modelAnalysis({ apiKey, records, question, signal: controller.signal, config: aiConfig, fetchImpl });
+      json(res, 200, { source: 'model', result });
+    } finally {
+      clearTimeout(timer);
+      res.off('close', onClose);
+      analysisInFlight = false;
+    }
   }
 
   async function handleTeacher(req, res, pathname) {
     if (pathname === '/api/teacher/session') {
       if (req.method !== 'GET') return json(res, 405, { error: '不支援的方法。' });
       return json(res, 200, teacherState(req));
+    }
+    if (pathname === '/api/teacher/records') {
+      if (req.method !== 'GET') return json(res, 405, { error: '不支援的方法。' });
+      if (!currentSession(req)) throw new RequestError('UNAUTHORIZED');
+      const all = store.all();
+      return json(res, 200, {
+        records: all.slice(-TEACHER_RECORD_LIMIT).reverse(),
+        total: all.length,
+        truncated: all.length > TEACHER_RECORD_LIMIT,
+        goals: Object.values(CLASS_GOALS).map(({ id, label }) => ({ id, label })),
+      });
+    }
+    if (pathname === '/api/teacher/analyze') {
+      if (req.method !== 'POST') return json(res, 405, { error: '不支援的方法。' });
+      if (!sameOrigin(req)) return json(res, 403, { error: '只接受本頁送出的請求。' });
+      if (!currentSession(req)) throw new RequestError('UNAUTHORIZED');
+      return handleAnalyze(req, res);
     }
     if (req.method !== 'POST') return json(res, 405, { error: '不支援的方法。' });
     if (!sameOrigin(req)) return json(res, 403, { error: '只接受本頁送出的請求。' });
@@ -299,7 +416,7 @@ export async function createTutorServer({
       if (typeof body.password !== 'string' || !body.password) throw new RequestError('INVALID_PASSWORD');
       await settings.update({ password: body.password, aiKey: body.aiKey });
       const token = startSession();
-      return json(res, 200, { ...settings.status(), loggedIn: true },
+      return json(res, 200, teacherState(req, true),
         { 'Set-Cookie': sessionCookie(token, SESSION_TTL_MS / 1000) });
     }
     if (pathname === '/api/teacher/login') {
@@ -315,21 +432,23 @@ export async function createTutorServer({
       }
       login.failures = 0;
       const token = startSession();
-      return json(res, 200, { ...settings.status(), loggedIn: true },
+      return json(res, 200, teacherState(req, true),
         { 'Set-Cookie': sessionCookie(token, SESSION_TTL_MS / 1000) });
     }
     if (pathname === '/api/teacher/logout') {
       const token = currentSession(req);
       if (token) sessions.delete(token);
-      return json(res, 200, { ...settings.status(), loggedIn: false }, { 'Set-Cookie': sessionCookie('', 0) });
+      return json(res, 200, teacherState(req, false), { 'Set-Cookie': sessionCookie('', 0) });
     }
     if (pathname === '/api/teacher/settings') {
       const token = currentSession(req);
       if (!token) throw new RequestError('UNAUTHORIZED');
-      await settings.update({ password: body.password || undefined, aiKey: body.aiKey, clearAi: body.clearAi === true });
+      await settings.update({
+        password: body.password || undefined, aiKey: body.aiKey, clearAi: body.clearAi === true, goal: body.goal,
+      });
       // A new password signs out every other open teacher page.
       if (body.password) for (const other of sessions.keys()) if (other !== token) sessions.delete(other);
-      return json(res, 200, { ...settings.status(), loggedIn: true });
+      return json(res, 200, teacherState(req, true));
     }
     return json(res, 404, { error: '找不到這個 API。' });
   }
@@ -345,7 +464,12 @@ export async function createTutorServer({
       const { pathname } = new URL(req.url, 'http://localhost');
       if (pathname === '/api/tutor/status') {
         if (req.method !== 'GET') return json(res, 405, { error: '不支援的方法。' });
-        return json(res, 200, { ok: true, modes: { mock: true, model: settings.status().aiConfigured } });
+        return json(res, 200, { ok: true, modes: { mock: true, model: settings.status().aiConfigured }, goal: goalInfo() });
+      }
+      if (pathname === '/api/records') {
+        if (req.method !== 'POST') return json(res, 405, { error: '不支援的方法。' });
+        if (!sameOrigin(req)) return json(res, 403, { error: '只接受本頁送出的請求。' });
+        return await handleRecord(req, res);
       }
       if (pathname === '/api/tutor') {
         if (req.method !== 'POST') return json(res, 405, { error: '不支援的方法。' });
@@ -357,8 +481,8 @@ export async function createTutorServer({
       if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, { error: '不支援的方法。' });
       return await serveStatic(req, res, root);
     } catch (error) {
-      const code = error instanceof RequestError || error instanceof ProviderError || error instanceof SettingsError
-        ? error.code : null;
+      const code = error instanceof RequestError || error instanceof ProviderError || error instanceof SettingsError ||
+        error instanceof RecordError || error instanceof AnalysisError ? error.code : null;
       if (code && ERRORS[code] && !res.headersSent) return fail(res, code);
       console.error('Tutor request failed', error);
       if (!res.headersSent) json(res, 500, { error: '本機服務發生錯誤。' });

@@ -161,6 +161,7 @@ test('teacher setup, login, settings and the student model path end to end', asy
   const fake = fakeProvider();
   const server = await createTutorServer({
     port: 0, staticDir, settingsFile: path.join(await tempDir('tutor-settings-'), 's.json'),
+    recordsFile: path.join(await tempDir('tutor-records-'), 'e.jsonl'),
     env: { TUTOR_AI_PER_MINUTE: '2' }, fetchImpl: fake.fetchImpl,
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -173,7 +174,7 @@ test('teacher setup, login, settings and the student model path end to end', asy
     });
     const session = async (cookie = '') => (await fetch(`${base}/api/teacher/session`, { headers: cookie ? { Cookie: cookie } : {} })).json();
 
-    assert.deepEqual(await session(), { initialized: false, aiConfigured: false, loggedIn: false });
+    assert.deepEqual(await session(), { initialized: false, aiConfigured: false, goal: 'free', loggedIn: false });
     assert.equal((await post('/api/teacher/login', { password: PASSWORD })).status, 409);
     assert.equal((await post('/api/teacher/setup', { password: 'short' })).status, 400);
 
@@ -184,7 +185,7 @@ test('teacher setup, login, settings and the student model path end to end', asy
     assert.match(setCookie, /SameSite=Strict/);
     assert.match(setCookie, /Path=\/api\/teacher/);
     const cookie = setCookie.split(';')[0];
-    assert.deepEqual(await session(cookie), { initialized: true, aiConfigured: false, loggedIn: true });
+    assert.deepEqual(await session(cookie), { initialized: true, aiConfigured: false, goal: 'free', loggedIn: true });
     assert.equal((await post('/api/teacher/setup', { password: PASSWORD })).status, 409);
 
     // Settings require a session and a same-origin request.
@@ -195,16 +196,16 @@ test('teacher setup, login, settings and the student model path end to end', asy
     });
     assert.equal(crossSite.status, 403);
     const saved = await post('/api/teacher/settings', { aiKey: API_KEY }, cookie);
-    assert.deepEqual(await saved.json(), { initialized: true, aiConfigured: true, loggedIn: true });
+    assert.deepEqual(await saved.json(), { initialized: true, aiConfigured: true, goal: 'free', loggedIn: true });
 
     const status = await (await fetch(`${base}/api/tutor/status`)).json();
-    assert.deepEqual(status, { ok: true, modes: { mock: true, model: true } });
+    assert.deepEqual(status.modes, { mock: true, model: true });
     assert.equal(JSON.stringify(status).includes(API_KEY), false);
 
     // Student asks in model mode.
     fake.replies.push(modelResponse({ guidance: '先看氧氣。', question: '空氣從哪裡進來？', relatedMetrics: ['fuelOxygen'] }));
     const asked = await post('/api/tutor', {
-      mode: 'model', question: '火為什麼熄了', context: rawContext(),
+      mode: 'model', studentId: 'S01', question: '火為什麼熄了', context: rawContext(),
       history: [{ role: 'student', text: '上一題' }, { role: 'tutor', text: '上一個提示' }],
     });
     assert.equal(asked.status, 200);
@@ -217,13 +218,13 @@ test('teacher setup, login, settings and the student model path end to end', asy
 
     // Upstream rejection is reported without retrying.
     fake.replies.push(new Response('{}', { status: 401 }));
-    const rejected = await post('/api/tutor', { mode: 'model', question: '再問一次', context: rawContext() });
+    const rejected = await post('/api/tutor', { mode: 'model', studentId: 'S01', question: '再問一次', context: rawContext() });
     assert.equal(rejected.status, 502);
     assert.equal((await rejected.json()).code, 'AUTH_REJECTED');
     assert.equal(fake.calls.length, 2);
 
     // Per-minute quota (set to 2 above) stops the third call before it leaves the computer.
-    const limited = await post('/api/tutor', { mode: 'model', question: '第三次', context: rawContext() });
+    const limited = await post('/api/tutor', { mode: 'model', studentId: 'S01', question: '第三次', context: rawContext() });
     assert.equal(limited.status, 429);
     assert.equal((await limited.json()).code, 'LOCAL_QUOTA');
     assert.equal(fake.calls.length, 2);
@@ -254,12 +255,14 @@ test('only one model request runs at a time', async () => {
     await gate;
     return modelResponse({ guidance: 'g', question: 'q' });
   };
-  const server = await createTutorServer({ port: 0, staticDir, settingsFile, env: {}, fetchImpl });
+  const server = await createTutorServer({
+    port: 0, staticDir, settingsFile, recordsFile: path.join(await tempDir('tutor-records-'), 'e.jsonl'), env: {}, fetchImpl,
+  });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   const ask = () => fetch(`${base}/api/tutor`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', Origin: base },
-    body: JSON.stringify({ mode: 'model', question: 'q', context: rawContext() }),
+    body: JSON.stringify({ mode: 'model', studentId: 'S01', question: 'q', context: rawContext() }),
   });
   try {
     const first = ask();

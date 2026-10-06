@@ -1,6 +1,8 @@
 import './teacher.css';
+import { CLASS_GOALS } from '../tutor/goals.mjs';
+import { renderWorkspace } from './workspace';
 
-type TeacherState = { initialized: boolean; aiConfigured: boolean; loggedIn: boolean };
+type TeacherState = { initialized: boolean; aiConfigured: boolean; goal: string; loggedIn: boolean };
 
 const PASSWORD_MIN = 12;
 const app = document.querySelector<HTMLElement>('#teacher-app')!;
@@ -8,8 +10,8 @@ const app = document.querySelector<HTMLElement>('#teacher-app')!;
 app.innerHTML = `
   <header class="teacher-header">
     <p class="eyebrow">火箭爐設計導師</p>
-    <h1>教師設定</h1>
-    <p>設定教師密碼與 NMKING AI 金鑰。金鑰只保存在這台電腦，學生端看不到。</p>
+    <h1>教師工作台</h1>
+    <p>查看學生的測試與提問紀錄、做 AI 分析，並設定本課目標與 NMKING AI 金鑰。金鑰只保存在這台電腦，學生端看不到。</p>
   </header>
   <section class="teacher-card" aria-live="polite">
     <div id="teacher-status" class="teacher-status">正在連線本機導師服務…</div>
@@ -103,6 +105,7 @@ function renderStatus(state: TeacherState) {
 
 function render(state: TeacherState) {
   renderStatus(state);
+  document.body.classList.remove('workspace-mode');
   if (!state.initialized) {
     view.innerHTML = `
       <form id="setup-form" class="teacher-form">
@@ -140,9 +143,25 @@ function render(state: TeacherState) {
     return;
   }
 
-  view.innerHTML = `
+  document.body.classList.add('workspace-mode');
+  renderWorkspace(view, { aiConfigured: state.aiConfigured, renderSettings: (into) => renderSettings(into, state) });
+}
+
+function renderSettings(into: HTMLElement, state: TeacherState) {
+  const goalOptions = Object.values(CLASS_GOALS)
+    .map((goal) => `<option value="${goal.id}"${goal.id === state.goal ? ' selected' : ''}>${goal.label}——${goal.hint}</option>`)
+    .join('');
+  into.innerHTML = `
+    <form id="goal-form" class="teacher-form">
+      <h2>本課目標</h2>
+      <label class="teacher-field" for="settings-goal">
+        <span>學生畫面上方會顯示這個目標，導師也會依它引導</span>
+        <select id="settings-goal">${goalOptions}</select>
+      </label>
+      <div class="teacher-actions"><button type="submit" class="teacher-primary">更新目標</button></div>
+    </form>
     <form id="settings-form" class="teacher-form">
-      <h2>更新設定</h2>
+      <h2>金鑰與密碼</h2>
       ${field('settings-key', state.aiConfigured ? '更換 NMKING AI 金鑰（留白＝保留目前金鑰）' : 'NMKING AI 金鑰', 'password', 'off')}
       <label class="teacher-check"><input id="settings-clear" type="checkbox" ${state.aiConfigured ? '' : 'disabled'} /> 清除已保存的金鑰（學生將只能用「本機提示」）</label>
       ${field('settings-password', '新的教師密碼（留白＝不變）', 'password', 'new-password')}
@@ -152,8 +171,13 @@ function render(state: TeacherState) {
         <button type="button" id="logout" class="teacher-secondary">登出</button>
       </div>
     </form>`;
-  const form = document.querySelector<HTMLFormElement>('#settings-form')!;
-  bindSubmit(form, async () => {
+  bindSubmit(into.querySelector<HTMLFormElement>('#goal-form')!, async () => {
+    const goal = into.querySelector<HTMLSelectElement>('#settings-goal')!.value;
+    const next = await call('/api/teacher/settings', { goal });
+    say(`本課目標已改為「${CLASS_GOALS[next.goal as keyof typeof CLASS_GOALS]?.label ?? ''}」；學生重新開啟導師視窗或重新整理後就會看到。`, 'ok');
+    state.goal = next.goal;
+  });
+  bindSubmit(into.querySelector<HTMLFormElement>('#settings-form')!, async () => {
     const password = value('settings-password');
     if (!checkPasswords(password, value('settings-confirm'), false)) return;
     const aiKey = value('settings-key');
@@ -166,9 +190,9 @@ function render(state: TeacherState) {
     say(clearAi ? '已清除金鑰。' : '已保存。留白的欄位維持原設定。', 'ok');
     render(next);
   });
-  document.querySelector<HTMLButtonElement>('#logout')!.addEventListener('click', () => {
+  into.querySelector<HTMLButtonElement>('#logout')!.addEventListener('click', () => {
     void call('/api/teacher/logout', {})
-      .then((next) => { say('已登出。', 'info'); render(next); })
+      .then((next) => { say('已登出，畫面上的紀錄已清除。', 'info'); render(next); })
       .catch((error: Error) => say(error.message, 'error'));
   });
 }

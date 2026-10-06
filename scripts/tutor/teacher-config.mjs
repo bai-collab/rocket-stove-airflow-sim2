@@ -4,6 +4,7 @@
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { CLASS_GOALS, DEFAULT_GOAL } from '../../src/tutor/goals.mjs';
 
 export const PASSWORD_MIN = 12;
 export const PASSWORD_MAX = 256;
@@ -32,7 +33,10 @@ function parseStored(raw) {
       typeof value.aiKey !== 'string' || (value.aiKey !== '' && !isValidApiKey(value.aiKey))) {
     throw new SettingsError('SETTINGS_CORRUPT');
   }
-  return { version: 1, salt: value.salt, passwordHash: value.passwordHash, aiKey: value.aiKey };
+  // Files written before class goals existed have no goal field.
+  const goal = value.goal === undefined ? DEFAULT_GOAL : value.goal;
+  if (!Object.hasOwn(CLASS_GOALS, goal)) throw new SettingsError('SETTINGS_CORRUPT');
+  return { version: 1, salt: value.salt, passwordHash: value.passwordHash, aiKey: value.aiKey, goal };
 }
 
 export async function openTeacherConfig(file) {
@@ -67,7 +71,7 @@ export async function openTeacherConfig(file) {
    * First save needs a password. Later saves: blank fields keep the stored
    * value, `clearAi` removes the key explicitly.
    */
-  function update({ password, aiKey, clearAi } = {}) {
+  function update({ password, aiKey, clearAi, goal } = {}) {
     const run = async () => {
       if ((password !== undefined && typeof password !== 'string') ||
           (aiKey !== undefined && typeof aiKey !== 'string')) {
@@ -79,8 +83,14 @@ export async function openTeacherConfig(file) {
       }
       const newKey = (aiKey ?? '').trim();
       if (newKey && !isValidApiKey(newKey)) throw new SettingsError('INVALID_API_KEY');
+      if (goal !== undefined && (typeof goal !== 'string' || !Object.hasOwn(CLASS_GOALS, goal))) {
+        throw new SettingsError('INVALID_SETTINGS');
+      }
 
-      const next = { version: 1, salt: stored?.salt, passwordHash: stored?.passwordHash, aiKey: stored?.aiKey ?? '' };
+      const next = {
+        version: 1, salt: stored?.salt, passwordHash: stored?.passwordHash,
+        aiKey: stored?.aiKey ?? '', goal: goal ?? stored?.goal ?? DEFAULT_GOAL,
+      };
       if (newPassword) {
         next.salt = randomBytes(16).toString('hex');
         next.passwordHash = hashPassword(newPassword, next.salt);
@@ -106,5 +116,5 @@ export async function openTeacherConfig(file) {
     return timingSafeEqual(Buffer.from(hashPassword(password, stored.salt), 'hex'), expected);
   }
 
-  return { status, verify, update, apiKey: () => stored?.aiKey ?? '' };
+  return { status, verify, update, apiKey: () => stored?.aiKey ?? '', goal: () => stored?.goal ?? DEFAULT_GOAL };
 }

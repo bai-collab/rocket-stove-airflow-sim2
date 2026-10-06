@@ -1,4 +1,5 @@
 import { getWallMaterial } from '../physics/wall-materials.mjs';
+import { CLASS_GOALS, normalizeGoal } from './goals.mjs';
 
 /**
  * Local rule-based tutor. It never calls a model: it reads the sanitized stove
@@ -72,6 +73,12 @@ const TOPICS = {
       relatedMetrics: ['wallInnerTemperature', 'wallOuterTemperature', 'fuelTemperature'],
     };
   },
+  stableBurn: (context) => ({
+    guidance: '本課目標是穩定燃燒：觀察「燃料區溫度」和「燃料區相對氧氣」是不是一直維持，而不是先衝高再掉下來。',
+    question: '如果火快熄了，你會先改進氣的開口，還是先加強燃燒室的保溫？為什麼？',
+    relatedCells: fuelCells(context),
+    relatedMetrics: ['fuelTemperature', 'fuelOxygen'],
+  }),
   pyrolysis: (context) => ({
     guidance: '「熱裂解比例」還很低：先看「燃料區溫度」有沒有升高，檢查稻稈是不是被磚擋住、熱氣流不到。',
     question: '點火後，熱氣是往稻稈的方向流，還是繞開了它？',
@@ -90,7 +97,10 @@ function topicFromQuestion(question) {
   return null;
 }
 
-export function mockTutorReply(context, question = '') {
+const GOAL_TOPICS = { lowSmoke: 'smoke', keepChar: 'char', stableBurn: 'stableBurn' };
+
+export function mockTutorReply(context, question = '', goalId = 'free') {
+  const goal = CLASS_GOALS[normalizeGoal(goalId)];
   const d = context.run.latest;
 
   if (!context.fuels.length) {
@@ -115,7 +125,9 @@ export function mockTutorReply(context, question = '') {
 
   if (!context.run.ignited) {
     return {
-      guidance: '先預測再點火：想一想熱氣和黑煙會往哪裡走，然後按「點火」觀察。',
+      guidance: goal.id === 'free'
+        ? '先預測再點火：想一想熱氣和黑煙會往哪裡走，然後按「點火」觀察。'
+        : `本課目標是「${goal.label}」：先預測這個爐型能不能做到，再按「點火」觀察。`,
       question: '點火後，你預測黑煙會從哪一個開口出去？',
       relatedCells: fuelCells(context),
       relatedMetrics: [],
@@ -135,6 +147,7 @@ export function mockTutorReply(context, question = '') {
   if (d.smoke > 0.08 && d.secondaryRate < 0.001) return TOPICS.smoke(context);
   if (d.smokeOut > 0.02 && d.secondaryRate > 0) return TOPICS.smoke(context, '已經有二次燃燒，但還有黑煙排出。');
   if (d.averageWallConductivity >= 1 && d.wallOuterTemperature > 60) return TOPICS.walls(context);
+  if (GOAL_TOPICS[goal.id]) return TOPICS[GOAL_TOPICS[goal.id]](context);
   if (d.charRetention < 0.35 && d.smoke < 0.03) {
     return {
       guidance: '目前黑煙低、炭也持續被燒掉，偏向充分燃燒；把這組數字記下來當作比較基準。',

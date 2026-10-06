@@ -57,7 +57,7 @@ const cellKey = (c, r) => `${c},${r}`;
 const inGrid = (c, r) => Number.isInteger(c) && Number.isInteger(r) && c >= 0 && r >= 0 && c < GRID_COLS && r < GRID_ROWS;
 
 /** Browser side: turn simulator state into the compact JSON the tutor reads. */
-export function buildStoveContext({ preset, edited, walls, fuels, ignited, backend, diagnostics, series }) {
+export function buildStoveContext({ preset, edited, walls, fuels, ignited, backend, diagnostics, series, runStart = 0 }) {
   const toCell = (p) => ({ c: Math.floor(p.x / BUILD_CELL), r: Math.floor(p.y / BUILD_CELL) });
   const latest = {};
   for (const key of Object.keys(TUTOR_METRICS)) latest[key] = Number(diagnostics[key]);
@@ -70,6 +70,7 @@ export function buildStoveContext({ preset, edited, walls, fuels, ignited, backe
     run: {
       ignited: ignited === true,
       time: Number(diagnostics.time),
+      startTime: Number(runStart),
       backend,
       fuelPhase: diagnostics.fuelPhase,
       reactiveFuel: Number(diagnostics.reactiveFuel ?? diagnostics.rawStraw + diagnostics.char + diagnostics.volatileGas),
@@ -112,6 +113,7 @@ export function sanitizeStoveContext(input) {
     .map((point) => {
       const clean = { t: finite(point.t, 0, 1e6) };
       for (const key of SERIES_METRICS) clean[key] = finite(point[key], -1e6, 1e6);
+      clean.burning = point.burning === 1 ? 1 : 0;
       return clean;
     });
 
@@ -125,6 +127,7 @@ export function sanitizeStoveContext(input) {
     run: {
       ignited: run.ignited === true,
       time: finite(run.time, 0, 1e6),
+      startTime: Math.min(finite(run.startTime, 0, 1e6), finite(run.time, 0, 1e6)),
       backend: BACKENDS.has(run.backend) ? run.backend : 'cpu',
       fuelPhase: FUEL_PHASES.has(run.fuelPhase) ? run.fuelPhase : 'unlit',
       reactiveFuel: finite(run.reactiveFuel, 0, 1e6),

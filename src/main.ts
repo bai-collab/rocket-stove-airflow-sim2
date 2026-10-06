@@ -23,7 +23,7 @@ import {
 } from './physics/wall-materials.mjs';
 import { interpretDiagnostics } from './tutor/rule-hints.mjs';
 import { SERIES_METRICS, buildStoveContext } from './tutor/stove-context.mjs';
-import { createTutorPanel, type TutorHighlight } from './tutor/TutorPanel';
+import { createTutorPanel, type TutorHighlight, type TutorServiceStatus } from './tutor/TutorPanel';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -35,8 +35,13 @@ app.innerHTML = `
         <p class="eyebrow">Physics v3 · Phase 5</p>
         <h1>火箭爐空氣流動與稻稈碳化模擬器</h1>
         <p>設計 → 點火 → 觀察氣流／黑煙／碳化 → 修改 → 再測試</p>
+        <p id="class-goal" class="class-goal" hidden></p>
       </div>
       <div class="topbar-actions">
+        <label class="student-id-field" hidden>
+          <span>學生代號</span>
+          <input id="student-id" maxlength="20" autocomplete="off" spellcheck="false" placeholder="例如 S01" />
+        </label>
         <button id="tutor-open" type="button" class="tutor-open">🧭 設計導師</button>
         <div id="backend-status" class="status-pill">正在偵測運算後端…</div>
       </div>
@@ -118,6 +123,7 @@ app.innerHTML = `
           <div id="advanced" class="metrics advanced"></div>
         </details>
         <div id="feedback" class="feedback"></div>
+        <p id="record-note" class="record-note" role="status"></p>
       </aside>
     </section>
   </main>
@@ -151,14 +157,24 @@ const backendDetail = document.querySelector<HTMLParagraphElement>('#backend-det
 const controller = new BrowserSimulationController();
 controller.attachGpuCanvas(gpuCanvas);
 const sim = controller.cpu;
+const studentIdField = document.querySelector<HTMLLabelElement>('.student-id-field')!;
+const studentIdInput = document.querySelector<HTMLInputElement>('#student-id')!;
+const classGoal = document.querySelector<HTMLParagraphElement>('#class-goal')!;
+const recordNote = document.querySelector<HTMLParagraphElement>('#record-note')!;
+const STUDENT_ID_PATTERN = /^[\p{L}\p{N}_-]{1,20}$/u;
+const STUDENT_ID_KEY = 'rocket-stove-student-id';
+let serviceAvailable = false;
+
 const tutor = createTutorPanel({
   openButton: document.querySelector<HTMLButtonElement>('#tutor-open')!,
   getContext: tutorContext,
+  requireStudentId,
   onHighlight: (highlight) => {
     tutorHighlight = highlight;
     drawPresentation();
     renderMetrics();
   },
+  onServiceStatus: renderServiceStatus,
 });
 let selectedTool = 'wall';
 let selectedPreset = 'straight';
@@ -172,6 +188,70 @@ let designEdited = false;
 let tutorHighlight: TutorHighlight | null = null;
 const SERIES_INTERVAL = 2;
 let runSeries: Record<string, number>[] = [];
+// One "test" is the time from ignition until the design is reset, cleared or
+// edited (or the page is left). It is recorded at most once, after 5 s.
+const MIN_RECORD_SECONDS = 5;
+const CHECKPOINT_SECONDS = 120;
+let runActive = false;
+let runSaved = false;
+let runStart = 0;
+let recordedTests = 0;
+
+function validStudentId() {
+  const id = studentIdInput.value.trim();
+  return STUDENT_ID_PATTERN.test(id) ? id : null;
+}
+
+function requireStudentId() {
+  const id = validStudentId();
+  studentIdField.classList.toggle('invalid', id === null);
+  if (id === null) studentIdInput.focus();
+  return id;
+}
+
+function renderServiceStatus(status: TutorServiceStatus) {
+  serviceAvailable = status.available;
+  studentIdField.hidden = !status.available;
+  classGoal.hidden = !status.goal || status.goal.id === 'free';
+  classGoal.textContent = status.goal ? `本課目標：${status.goal.label}——${status.goal.hint}` : '';
+}
+
+function startRunSegment() {
+  runStart = sim.time;
+  runSeries = [];
+  runActive = true;
+  runSaved = false;
+}
+
+/** Ends the current test segment and saves it when it is long enough. */
+function finishRun(reason: 'reset' | 'edit' | 'clear' | 'leave' | 'checkpoint') {
+  if (!runActive || runSaved) return;
+  runSaved = true;
+  if (!serviceAvailable || sim.time - runStart < MIN_RECORD_SECONDS) return;
+  const studentId = validStudentId();
+  if (!studentId) {
+    recordNote.textContent = '沒有學生代號，這次測試沒有記錄。';
+    return;
+  }
+  // The context is captured now, before the caller changes the design.
+  const body = JSON.stringify({ studentId, endReason: reason, context: tutorContext() });
+  void fetch('/api/records', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+    keepalive: reason === 'leave',
+  }).then(async (response) => {
+    const data = await response.json().catch(() => null);
+    if (response.ok) {
+      recordedTests += 1;
+      recordNote.textContent = `已記錄 ${recordedTests} 次測試（代號 ${studentId}）。`;
+    } else {
+      recordNote.textContent = typeof data?.error === 'string' ? data.error : '這次測試沒有記錄成功。';
+    }
+  }).catch(() => {
+    recordNote.textContent = '連不到本機導師服務，這次測試沒有記錄。';
+  });
+}
 
 function isBackendPreference(value: string | null): value is BackendPreference {
   return value === 'auto' || value === 'cpu' || value === 'gpu';
@@ -379,10 +459,11 @@ function interpret(d: ReturnType<typeof sim.diagnostics>) {
 }
 
 function sampleRunSeries(d: ReturnType<typeof sim.diagnostics>) {
-  if (!sim.ignited) return;
+  if (!runActive) return;
+  if (!runSaved && d.time - runStart >= CHECKPOINT_SECONDS) finishRun('checkpoint');
   const last = runSeries.at(-1);
   if (last && d.time - last.t < SERIES_INTERVAL) return;
-  const point: Record<string, number> = { t: d.time };
+  const point: Record<string, number> = { t: d.time, burning: d.fuelPhase === 'burning' ? 1 : 0 };
   for (const key of SERIES_METRICS) point[key] = Number(d[key as keyof typeof d]);
   runSeries = [...runSeries.slice(-59), point];
 }
@@ -397,6 +478,7 @@ function tutorContext() {
     backend: controller.status.effective,
     diagnostics: sim.diagnostics(),
     series: runSeries,
+    runStart,
   });
 }
 
@@ -667,8 +749,10 @@ function queueTool(event: PointerEvent) {
   const p = canvasPoint(event);
   editQueue = editQueue
     .then(async () => {
+      finishRun('edit');
       await controller.setToolAt(selectedTool, p.x, p.y, selectedWallMaterialId);
       markDesignChanged(true);
+      if (sim.ignited) startRunSegment();
       drawPresentation();
       renderMetrics();
     })
@@ -708,7 +792,9 @@ presetGrid.innerHTML = Object.entries(STOVE_PRESETS)
   .join('');
 
 async function loadPreset(id: string) {
+  finishRun('reset');
   if (!await controller.loadPreset(id)) return;
+  runActive = false;
   selectedPreset = id;
   markDesignChanged(false);
   const preset = STOVE_PRESETS[id as keyof typeof STOVE_PRESETS];
@@ -730,7 +816,7 @@ presetGrid.addEventListener('click', (event) => {
 });
 
 igniteButton.addEventListener('click', () => {
-  void controller.ignite().then(() => { runSeries = []; })
+  void controller.ignite().then(() => { if (sim.ignited && !runActive) startRunSegment(); })
     .catch((error) => console.error('Ignition failed', error));
 });
 pauseButton.addEventListener('click', () => {
@@ -742,7 +828,9 @@ resetButton.addEventListener('click', () => {
   void loadPreset(selectedPreset).catch((error) => console.error('Preset reset failed', error));
 });
 clearButton.addEventListener('click', () => {
+  finishRun('clear');
   void controller.clearScene().then(() => {
+    runActive = false;
     markDesignChanged(true);
     accumulator = 0;
     drawPresentation();
@@ -799,4 +887,18 @@ await loadPreset(selectedPreset);
 await controller.initialize(initialBackend);
 requestAnimationFrame(frameLoop);
 
+try {
+  studentIdInput.value = localStorage.getItem(STUDENT_ID_KEY) ?? '';
+} catch {
+  // Not remembered in this browser.
+}
+studentIdInput.addEventListener('input', () => {
+  studentIdField.classList.remove('invalid');
+  try {
+    localStorage.setItem(STUDENT_ID_KEY, studentIdInput.value.trim());
+  } catch {
+    // Not remembered in this browser.
+  }
+});
+window.addEventListener('pagehide', () => finishRun('leave'));
 window.addEventListener('beforeunload', () => controller.dispose());

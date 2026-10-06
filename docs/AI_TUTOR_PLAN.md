@@ -1,6 +1,6 @@
 # 火箭爐模擬器 AI 功能計畫書
 
-> 狀態：P1（本機服務＋本機提示導師）與 P2（NMKING 真實模型＋教師設定頁）已實作；P3 起尚未開始
+> 狀態：P1（本機服務＋本機提示導師）、P2（NMKING 真實模型＋教師設定頁）與 P3（學生代號、學習紀錄、本課目標、教師工作台）已實作；P4（GAS 同步、校內區網）未開始
 > 參考：`bai-collab/osep-judge`（`scripts/tutor/`、`src/components/judge-panel/`）、`bai-collab/teacher_UI`（`skill/teacher-workspace-ui/`）
 
 ## 0. 結論先講
@@ -119,7 +119,7 @@ GitHub Pages 靜態版維持現狀（無 AI），AI 功能只在本機服務版�
 | **P0 決策** ✅ | 確認 §8 的待決事項，尤其授權與 AI 服務商 | 已決定，見 §8 |
 | **P1 本機服務＋導師（模擬模式）** ✅ | `scripts/tutor/server.mjs`、`stove-context.mjs`（快照＋清洗＋ASCII 圖）、浮動導師 UI、格子／指標高亮、擴充 `interpret()` 為 mock 導師 | `node --test` 覆蓋清洗、高亮座標驗證、mock 回覆；Playwright 截圖：桌面／平板導師可開關、高亮正確、不擋住點火按鈕 |
 | **P2 真實模型** ✅ | `provider.mjs`（Responses 相容、endpoint/model 由環境變數、非串流、不自動重試、逾時取消）、教師設定頁（密碼 12 字＋API KEY） | 假 AI 伺服器測 401/429/逾時/JSON 錯誤/越權引用；金鑰不出現在任何回應或前端儲存 |
-| **P3 紀錄＋教師工作台** | 學生代號、`test`／`ai` 紀錄、教師頁（以 teacher_UI 範本改造：設計縮圖取代積木快照）、教師 AI 分析 | 假資料 DEMO 模式可搜尋、篩選、展開、分析、引用跳回；登出清空 |
+| **P3 紀錄＋教師工作台** ✅ | 學生代號、`test`／`ai` 紀錄、教師頁（以 teacher_UI 範本改造：設計縮圖取代積木快照）、教師 AI 分析 | 假資料 DEMO 模式可搜尋、篩選、展開、分析、引用跳回；登出清空 |
 | **P4（選用）GAS 同步、校內區網** | 沿用 teacher_UI `Code.gs` 與 `school-lan.mjs`；區網只開學生路由＋求助上限 | 第二台電腦可連學生頁、教師頁回 403；GAS 實際寫入需使用者在自己帳號驗證 |
 | **P5 文件** | README、`docs/TEACHER-SETUP.md`、`IMPLEMENTATION_STATUS.yaml` 更新 | 依文件從零啟動成功 |
 
@@ -140,9 +140,9 @@ GitHub Pages 靜態版維持現狀（無 AI），AI 功能只在本機服務版�
 |---|---|---|
 | 1 | 授權 | 只參照 osep-judge／teacher_UI 的設計與資料契約重寫，不複製其 GPL-3.0 程式碼 |
 | 2 | AI 服務 | P2 使用 NMKING（Responses 相容端點） |
-| 3 | 範圍 | 先做 P1；P2／P3 待 P1 課堂試用後再排 |
+| 3 | 範圍 | P1 → P2 → P3 依序完成；學生需輸入代號 |
 | 4 | 區網 | 未決定（影響 GPU 可用性，見 §7-2） |
-| 5 | 課堂目標 | 未決定（P3 才需要） |
+| 5 | 課堂目標 | 低黑煙、多留炭、穩定燃燒（另有「自由探索」為預設） |
 
 ## 9. P1 實作摘要
 
@@ -172,3 +172,19 @@ GitHub Pages 靜態版維持現狀（無 AI），AI 功能只在本機服務版�
 環境變數（選用）：`TUTOR_AI_ENDPOINT`、`TUTOR_AI_MODEL`、`TUTOR_AI_REASONING`（low／medium／high／max）、`TUTOR_AI_PER_MINUTE`、`TUTOR_PORT`。
 
 **未驗證**：實際 NMKING 金鑰的連線、回覆品質、延遲（`reasoning.effort=max` 可能需數十秒）與計費。需由教師以自己的金鑰實測；若太慢可設 `TUTOR_AI_REASONING=medium`。
+
+## 11. P3 實作摘要
+
+| 檔案 | 內容 |
+|---|---|
+| `src/tutor/goals.mjs` | 本課目標（自由探索／低黑煙／多留炭／穩定燃燒）與 `summarizeRun()` 測試摘要（持續燃燒比例、最高溫、平均氧氣、黑煙排出、二次燃燒、炭保留、熱裂解） |
+| `scripts/tutor/record-store.mjs` | `local-data/records/events.jsonl`；id、序號、時間由伺服器產生；損壞行略過 |
+| `scripts/tutor/teacher-analysis.mjs` | 依紀錄 id 重取資料；本機摘要（不呼叫 AI）或 NMKING 分析；觀察／推測必須引用本批 id，否則整份拒絕 |
+| `scripts/tutor/server.mjs` | `POST /api/records`（測試≥5 秒才記錄，每分鐘 60 筆上限）；`/api/tutor` 需學生代號並由伺服器寫入提問紀錄（失敗只記真的呼叫過 AI 的）；`GET /api/teacher/records`（最新 2000 筆）；`POST /api/teacher/analyze`（最多 100 筆、同時 1 個、150 秒逾時）；設定可改本課目標 |
+| `src/main.ts` | 上方「學生代號」（記在瀏覽器）、本課目標橫幅；一次測試＝點火到重新載入／清除／修改爐型／離開頁面，或滿 2 分鐘自動記錄 |
+| `src/teacher/workspace.ts` | 教師工作台：學生清單與搜尋、類型／目標／臺北日期篩選、時間軸展開爐型縮圖與摘要；AI 分析分頁（範圍＝目前篩選）；引用可跳回原紀錄；登出清空畫面 |
+| `tests/tutor-records.test.mjs` | 摘要、目標導向提示、代號規則、紀錄保存、本機與模型分析、伺服器紀錄流程 |
+
+界線：
+- 測試摘要由學生瀏覽器的模擬結果計算，伺服器只檢查格式與範圍，不能證明數值未被竄改；學生代號為自填。
+- 分析與導師都不打分數、不排名；「多留炭」與「低黑煙」本來就互相拉扯，不同目標的結果不互相比較。

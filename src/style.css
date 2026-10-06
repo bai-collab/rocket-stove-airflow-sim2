@@ -82,6 +82,14 @@ summary { cursor: pointer; font-weight: 700; color: #334155; margin-bottom: 10px
 .feedback { margin-top: 12px; padding: 11px; border-radius: 10px; background: #f1f5f9; color: #334155; font-size: 12px; line-height: 1.6; }
 .model-note { margin: 10px 2px 0; }
 .topbar-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.student-id-field { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 12px; border: 1px solid #cbd5e1; border-radius: 999px; background: white; color: #334155; font-size: 12px; font-weight: 750; }
+.student-id-field[hidden] { display: none; }
+.student-id-field input { width: 110px; min-height: 32px; border: 1px solid #e2e8f0; border-radius: 999px; padding: 4px 10px; font-size: 13px; }
+.student-id-field.invalid { border-color: #e11d48; box-shadow: 0 0 0 3px rgba(225,29,72,.18); }
+.student-id-field.invalid span::after { content: '（必填）'; color: #be123c; }
+.class-goal { display: inline-block; margin: 10px 0 0 !important; padding: 6px 12px; border-radius: 999px; background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46 !important; font-size: 13px; font-weight: 700; }
+.class-goal[hidden] { display: none; }
+.record-note { margin: 8px 0 0; min-height: 1em; color: #475569; font-size: 11px; line-height: 1.5; }
 .tutor-open { min-height: 40px; padding: 8px 14px; border: 1px solid #be123c; border-radius: 999px; background: #fff1f2; color: #9f1239; font-size: 13px; font-weight: 750; }
 .tutor-open[aria-expanded="true"] { background: #be123c; color: white; }
 .tutor-open:focus-visible, .tutor-window button:focus-visible, .tutor-window textarea:focus-visible { outline: 3px solid #fb7185; outline-offset: 2px; }
