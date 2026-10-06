@@ -1,6 +1,6 @@
 # 火箭爐模擬器 AI 功能計畫書
 
-> 狀態：P1 已實作（本機服務＋本機提示導師）；P2 起尚未開始
+> 狀態：P1（本機服務＋本機提示導師）與 P2（NMKING 真實模型＋教師設定頁）已實作；P3 起尚未開始
 > 參考：`bai-collab/osep-judge`（`scripts/tutor/`、`src/components/judge-panel/`）、`bai-collab/teacher_UI`（`skill/teacher-workspace-ui/`）
 
 ## 0. 結論先講
@@ -118,7 +118,7 @@ GitHub Pages 靜態版維持現狀（無 AI），AI 功能只在本機服務版�
 |---|---|---|
 | **P0 決策** ✅ | 確認 §8 的待決事項，尤其授權與 AI 服務商 | 已決定，見 §8 |
 | **P1 本機服務＋導師（模擬模式）** ✅ | `scripts/tutor/server.mjs`、`stove-context.mjs`（快照＋清洗＋ASCII 圖）、浮動導師 UI、格子／指標高亮、擴充 `interpret()` 為 mock 導師 | `node --test` 覆蓋清洗、高亮座標驗證、mock 回覆；Playwright 截圖：桌面／平板導師可開關、高亮正確、不擋住點火按鈕 |
-| **P2 真實模型** | `provider.mjs`（Responses 相容、endpoint/model 由環境變數、非串流、不自動重試、逾時取消）、教師設定頁（密碼 12 字＋API KEY） | 假 AI 伺服器測 401/429/逾時/JSON 錯誤/越權引用；金鑰不出現在任何回應或前端儲存 |
+| **P2 真實模型** ✅ | `provider.mjs`（Responses 相容、endpoint/model 由環境變數、非串流、不自動重試、逾時取消）、教師設定頁（密碼 12 字＋API KEY） | 假 AI 伺服器測 401/429/逾時/JSON 錯誤/越權引用；金鑰不出現在任何回應或前端儲存 |
 | **P3 紀錄＋教師工作台** | 學生代號、`test`／`ai` 紀錄、教師頁（以 teacher_UI 範本改造：設計縮圖取代積木快照）、教師 AI 分析 | 假資料 DEMO 模式可搜尋、篩選、展開、分析、引用跳回；登出清空 |
 | **P4（選用）GAS 同步、校內區網** | 沿用 teacher_UI `Code.gs` 與 `school-lan.mjs`；區網只開學生路由＋求助上限 | 第二台電腦可連學生頁、教師頁回 403；GAS 實際寫入需使用者在自己帳號驗證 |
 | **P5 文件** | README、`docs/TEACHER-SETUP.md`、`IMPLEMENTATION_STATUS.yaml` 更新 | 依文件從零啟動成功 |
@@ -157,3 +157,18 @@ GitHub Pages 靜態版維持現狀（無 AI），AI 功能只在本機服務版�
 | `tests/tutor-*.test.mjs` | 清洗、接地、模擬導師、伺服器安全與靜態檔測試 |
 
 使用方式：`npm run tutor:build` → `npm run tutor:serve` → 開 `http://127.0.0.1:8620/`。GitHub Pages 版的導師按鈕會顯示「需要本機服務版」，不送出請求。
+
+## 10. P2 實作摘要
+
+| 檔案 | 內容 |
+|---|---|
+| `scripts/tutor/nmking.mjs` | NMKING Responses 呼叫：端點 `https://ai.nmking.io/v1/responses`、模型 `openai/gpt-5.6-luna`、`reasoning.effort=max`、指定標頭（沿用 osep-judge 文件記載的已驗證接線）；非串流、不重試、`redirect: error`、回應 200 KB 上限；輸出經 `groundTutorReply` 接地，含金鑰即拒絕 |
+| `scripts/tutor/teacher-config.mjs` | `local-data/teacher-settings.json`（0600）：scrypt 密碼雜湊＋NMKING 金鑰；留白保留、勾選清除、寫入序列化與原子替換 |
+| `scripts/tutor/server.mjs` | 新增 `/api/teacher/{session,setup,login,logout,settings}`；HttpOnly＋SameSite=Strict 工作階段（8 小時、Path=/api/teacher）；登入錯 5 次鎖 1 分鐘；`/api/tutor` 支援 `mode: "model"`，同時只跑 1 個 AI 請求、每分鐘上限 6（`TUTOR_AI_PER_MINUTE`）、90 秒逾時、學生關頁即中止 |
+| `teacher.html`、`src/teacher/` | 教師設定頁：首次設定、登入、更換／清除金鑰、改密碼、登出；說明外傳內容與費用 |
+| `src/tutor/TutorPanel.ts` | 模式切換（本機提示／NMKING 真實模型，未設金鑰時停用）、取消按鈕、最近 6 輪對話作為模型上下文、教師設定連結 |
+| `tests/tutor-model.test.mjs` | 假 NMKING：請求格式、錯誤碼對應、金鑰不外洩、教師流程、頻率與並行限制 |
+
+環境變數（選用）：`TUTOR_AI_ENDPOINT`、`TUTOR_AI_MODEL`、`TUTOR_AI_REASONING`（low／medium／high／max）、`TUTOR_AI_PER_MINUTE`、`TUTOR_PORT`。
+
+**未驗證**：實際 NMKING 金鑰的連線、回覆品質、延遲（`reasoning.effort=max` 可能需數十秒）與計費。需由教師以自己的金鑰實測；若太慢可設 `TUTOR_AI_REASONING=medium`。

@@ -171,13 +171,17 @@ ai_tutor:
   phase_1_local_mock_tutor: completed
   reference_policy: design-only rewrite of osep-judge / teacher_UI; no GPL code copied
   service: scripts/tutor/server.mjs on 127.0.0.1:8620 (Node built-ins, loopback only)
+  phase_2_nmking_model_and_teacher_settings: completed_with_fake_provider_tests
   modes:
     mock: rule-based, no model call
-    model: not enabled (phase 2, NMKING)
+    model: NMKING Responses API via scripts/tutor/nmking.mjs; key stored only in local-data/
+  teacher_page: teacher.html (local service only)
+  unverified: real NMKING key, latency and billing
   physics_changes: none
   tests:
     - tests/tutor-context.test.mjs
     - tests/tutor-server.test.mjs
+    - tests/tutor-model.test.mjs
 
 next:
   phase_6_browser_release_validation:

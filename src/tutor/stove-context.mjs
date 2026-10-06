@@ -8,6 +8,8 @@ export const GRID_ROWS = Math.ceil(SIM_HEIGHT / BUILD_CELL);
 export const MAX_RELATED = 3;
 export const MAX_SERIES = 60;
 export const MAX_QUESTION_LENGTH = 300;
+export const MAX_HISTORY_TURNS = 6;
+const MAX_HISTORY_TEXT = 400;
 const MAX_FUELS = 60;
 const MAX_TEXT = 200;
 
@@ -139,6 +141,16 @@ export function sanitizeQuestion(value) {
   return question;
 }
 
+/** Recent conversation turns for the model; anything malformed is dropped. */
+export function sanitizeHistory(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((turn) => plain(turn) && (turn.role === 'student' || turn.role === 'tutor') &&
+      typeof turn.text === 'string' && turn.text.trim())
+    .slice(-MAX_HISTORY_TURNS)
+    .map((turn) => ({ role: turn.role, text: turn.text.trim().slice(0, MAX_HISTORY_TEXT) }));
+}
+
 const MATERIAL_GLYPHS = Object.freeze({ insulating: 'I', standard: '#', conductive: 'K' });
 
 /** Text picture of the stove for a language model: rows top to bottom. */
@@ -164,7 +176,7 @@ export function groundableCells(context) {
 }
 
 const METRIC_KEY_PATTERN = new RegExp(
-  `(?<![A-Za-z0-9_])(?:${[...Object.keys(TUTOR_METRICS), ...Object.keys(WALL_MATERIALS)].join('|')})(?![A-Za-z0-9_])`,
+  `[ \\t]?(?<![A-Za-z0-9_])(${[...Object.keys(TUTOR_METRICS), ...Object.keys(WALL_MATERIALS)].join('|')})(?![A-Za-z0-9_])[ \\t]?`,
   'g',
 );
 
@@ -173,7 +185,7 @@ function cleanText(value) {
   // Internal field names are replaced by the on-screen label so students only
   // see words that exist in the interface.
   return value
-    .replace(METRIC_KEY_PATTERN, (key) => (Object.hasOwn(TUTOR_METRICS, key) ? `「${TUTOR_METRICS[key]}」` : `「${WALL_MATERIALS[key].label}」`))
+    .replace(METRIC_KEY_PATTERN, (_match, key) => (Object.hasOwn(TUTOR_METRICS, key) ? `「${TUTOR_METRICS[key]}」` : `「${WALL_MATERIALS[key].label}」`))
     .trim()
     .slice(0, MAX_TEXT);
 }

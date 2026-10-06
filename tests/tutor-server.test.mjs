@@ -14,7 +14,7 @@ await fs.writeFile(path.join(staticDir, 'assets', 'app.js'), 'export {};');
 await fs.writeFile(path.join(staticDir, '.env'), 'SECRET=1');
 await fs.writeFile(path.join(path.dirname(staticDir), 'outside.txt'), 'outside');
 
-const server = createTutorServer({ port: 0, staticDir });
+const server = await createTutorServer({ port: 0, staticDir, settingsFile: path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'tutor-settings-')), 'settings.json') });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const { port } = server.address();
 const base = `http://127.0.0.1:${port}`;
@@ -54,10 +54,12 @@ test('mock tutor answers with grounded guidance', async () => {
   assert.ok(Array.isArray(data.reply.relatedMetrics));
 });
 
-test('model mode is refused until it is enabled', async () => {
+test('model mode is refused until a teacher saves an API key', async () => {
   const response = await ask({ mode: 'model', question: '你好', context: context() });
-  assert.equal(response.status, 400);
-  assert.equal((await response.json()).code, 'INVALID_MODE');
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).code, 'MODEL_NOT_CONFIGURED');
+  const unknown = await ask({ mode: 'magic', question: '你好', context: context() });
+  assert.equal((await unknown.json()).code, 'INVALID_MODE');
 });
 
 test('bad questions, bad context and bad JSON are rejected', async () => {

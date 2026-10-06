@@ -15,8 +15,16 @@ type TutorPanelOptions = {
 };
 
 type Availability = 'checking' | 'available' | 'unavailable';
+type TutorMode = 'mock' | 'model';
+type HistoryTurn = { role: 'student' | 'tutor'; text: string };
 
-const REQUEST_TIMEOUT_MS = 15000;
+const REQUEST_TIMEOUT_MS: Record<TutorMode, number> = { mock: 15000, model: 100000 };
+const MAX_HISTORY = 6;
+const MODE_STORAGE_KEY = 'rocket-stove-tutor-mode';
+const MODE_LABELS: Record<TutorMode, string> = {
+  mock: '本機提示 · 不呼叫 AI',
+  model: 'NMKING 真實模型 · 可能消耗額度',
+};
 const UNAVAILABLE_NOTE = '設計導師需要本機服務版：在專案資料夾執行 npm run tutor:build 與 npm run tutor:serve，再開 http://127.0.0.1:8620/ 。線上 GitHub Pages 版沒有導師。';
 
 /**
@@ -34,7 +42,7 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
     <header class="tutor-header">
       <div>
         <strong id="tutor-title">爐體設計導師</strong>
-        <small class="tutor-mode">本機提示 · 不呼叫 AI</small>
+        <small class="tutor-mode"></small>
       </div>
       <div class="tutor-header-actions">
         <button type="button" class="tutor-icon" data-action="minimize" aria-label="縮小導師視窗" title="縮小">─</button>
@@ -44,13 +52,20 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
     <div class="tutor-body">
       <ol class="tutor-log" aria-live="polite"></ol>
       <form class="tutor-form">
+        <fieldset class="tutor-modes">
+          <legend>導師模式</legend>
+          <label><input type="radio" name="tutor-mode" value="mock" checked /> 本機提示</label>
+          <label><input type="radio" name="tutor-mode" value="model" /> NMKING 真實模型</label>
+        </fieldset>
         <label class="tutor-label" for="tutor-question">說說你的想法或卡住的地方</label>
         <textarea id="tutor-question" rows="3" maxlength="300" placeholder="例如：為什麼黑煙一直從上面跑出來？"></textarea>
         <div class="tutor-actions">
           <button type="button" class="tutor-secondary" data-action="highlight" disabled>顯示相關位置</button>
+          <button type="button" class="tutor-secondary" data-action="cancel" hidden>取消</button>
           <button type="submit" class="tutor-primary">取得提示</button>
         </div>
         <p class="tutor-note"></p>
+        <p class="tutor-teacher-link"><a href="teacher.html" target="_blank" rel="noopener">教師設定</a></p>
       </form>
     </div>
   `;
@@ -63,11 +78,40 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
   const submitButton = panel.querySelector<HTMLButtonElement>('.tutor-primary')!;
   const highlightButton = panel.querySelector<HTMLButtonElement>('[data-action="highlight"]')!;
   const note = panel.querySelector<HTMLParagraphElement>('.tutor-note')!;
+  const modeLabel = panel.querySelector<HTMLElement>('.tutor-mode')!;
+  const cancelButton = panel.querySelector<HTMLButtonElement>('[data-action="cancel"]')!;
+  const modelRadio = panel.querySelector<HTMLInputElement>('input[name="tutor-mode"][value="model"]')!;
+  const mockRadio = panel.querySelector<HTMLInputElement>('input[name="tutor-mode"][value="mock"]')!;
 
   let availability: Availability = 'checking';
   let pending: AbortController | null = null;
   let lastHighlight: TutorHighlight | null = null;
   let highlightVisible = false;
+  let modelAvailable = false;
+  let mode: TutorMode = 'mock';
+  let history: HistoryTurn[] = [];
+
+  function readStoredMode(): TutorMode {
+    try {
+      return localStorage.getItem(MODE_STORAGE_KEY) === 'model' ? 'model' : 'mock';
+    } catch {
+      return 'mock';
+    }
+  }
+
+  function setMode(next: TutorMode) {
+    const effective = next === 'model' && modelAvailable ? 'model' : 'mock';
+    if (effective !== mode) history = [];
+    mode = effective;
+    (mode === 'model' ? modelRadio : mockRadio).checked = true;
+    modeLabel.textContent = MODE_LABELS[mode];
+    try {
+      localStorage.setItem(MODE_STORAGE_KEY, next);
+    } catch {
+      // The choice simply is not remembered.
+    }
+    refreshControls();
+  }
 
   function setHighlightVisible(visible: boolean) {
     highlightVisible = visible && lastHighlight !== null && !panel.hidden && !panel.classList.contains('minimized');
@@ -80,10 +124,16 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
     const busy = pending !== null;
     submitButton.disabled = availability !== 'available' || busy;
     textarea.disabled = availability === 'unavailable';
-    submitButton.textContent = busy ? '思考中…' : '取得提示';
-    note.textContent = availability === 'available'
-      ? '提示由本機規則產生，只會指出位置，不會替你放磚或點火。'
-      : availability === 'checking' ? '正在確認本機導師服務…' : UNAVAILABLE_NOTE;
+    submitButton.textContent = busy ? '思考中…' : mode === 'model' ? '向導師提問' : '取得提示';
+    cancelButton.hidden = !busy;
+    modelRadio.disabled = availability !== 'available' || !modelAvailable || busy;
+    mockRadio.disabled = availability !== 'available' || busy;
+    if (availability === 'checking') note.textContent = '正在確認本機導師服務…';
+    else if (availability === 'unavailable') note.textContent = UNAVAILABLE_NOTE;
+    else if (mode === 'model') note.textContent = '會把目前爐型、觀察數據與你的問題送到 NMKING；每次提問呼叫一次 AI，可能消耗額度，不會自動重試。導師只指出位置，不會替你放磚或點火。';
+    else note.textContent = modelAvailable
+      ? '提示由本機規則產生，不呼叫 AI。導師只指出位置，不會替你放磚或點火。'
+      : '提示由本機規則產生，不呼叫 AI。老師設定 AI 金鑰後才能選「NMKING 真實模型」。';
   }
 
   function addEntry(role: 'student' | 'tutor' | 'system', lines: [string, string][]) {
@@ -109,6 +159,7 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
     openButton.setAttribute('aria-expanded', 'true');
     setHighlightVisible(lastHighlight !== null);
     textarea.focus();
+    void detectService();
   }
 
   function close() {
@@ -128,14 +179,24 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
   async function ask(question: string) {
     pending?.abort();
     const controller = new AbortController();
+    const askedMode = mode;
+    let timedOut = false;
     pending = controller;
-    const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const timer = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, REQUEST_TIMEOUT_MS[askedMode]);
     refreshControls();
     try {
       const response = await fetch('/api/tutor', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'mock', question, context: getContext() }),
+        body: JSON.stringify({
+          mode: askedMode,
+          question,
+          context: getContext(),
+          history: askedMode === 'model' ? history : [],
+        }),
         signal: controller.signal,
       });
       const data = await response.json().catch(() => null);
@@ -146,12 +207,19 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
       const reply = data.reply as TutorReply;
       addEntry('tutor', [['這一輪先做：', reply.guidance], ['接著想一想：', reply.question]]);
       textarea.value = '';
+      if (askedMode === 'model' && mode === 'model') {
+        history = [...history, { role: 'student' as const, text: question },
+          { role: 'tutor' as const, text: `${reply.guidance}\n${reply.question}` }].slice(-MAX_HISTORY);
+      }
       lastHighlight = reply.relatedCells.length || reply.relatedMetrics.length
         ? { cells: reply.relatedCells, metrics: reply.relatedMetrics }
         : null;
       setHighlightVisible(true);
     } catch {
-      addEntry('system', [['', controller.signal.aborted ? '等待太久，已停止這次提問；你的文字仍保留在輸入框。' : '連不到本機導師服務，請確認服務視窗仍開著。']]);
+      const text = !controller.signal.aborted ? '連不到本機導師服務，請確認服務視窗仍開著。'
+        : timedOut ? '等待太久，已停止這次提問；你的文字仍保留在輸入框。'
+          : '已取消這次提問；你的文字仍保留在輸入框。AI 服務端可能仍會計算這次額度。';
+      addEntry('system', [['', text]]);
     } finally {
       window.clearTimeout(timer);
       if (pending === controller) pending = null;
@@ -181,6 +249,12 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
     if (action === 'close') close();
     else if (action === 'minimize') toggleMinimized();
     else if (action === 'highlight') setHighlightVisible(!highlightVisible);
+    else if (action === 'cancel') pending?.abort();
+  });
+
+  panel.querySelector('.tutor-modes')!.addEventListener('change', (event) => {
+    const value = (event.target as HTMLInputElement).value;
+    setMode(value === 'model' ? 'model' : 'mock');
   });
 
   panel.addEventListener('keydown', (event) => {
@@ -221,12 +295,15 @@ export function createTutorPanel({ openButton, getContext, onHighlight }: TutorP
       const response = await fetch('/api/tutor/status', { cache: 'no-store' });
       const data = response.ok ? await response.json() : null;
       availability = data?.ok === true && data.modes?.mock === true ? 'available' : 'unavailable';
+      modelAvailable = availability === 'available' && data.modes.model === true;
     } catch {
       availability = 'unavailable';
+      modelAvailable = false;
     }
-    refreshControls();
+    setMode(readStoredMode());
   }
 
+  modeLabel.textContent = MODE_LABELS[mode];
   refreshControls();
   void detectService();
 

@@ -64,18 +64,23 @@ npm run build
 - https://vgpu.sh/agents.md
 - https://vgpu.sh/llms.txt
 
-## 本機設計導師（AI 功能 P1）
+## 本機設計導師（AI 功能）
 
 模擬器右上角的「🧭 設計導師」會讀取目前爐型與觀察數據，給「這一輪先做」與「接著想一想」，並在畫布上用玫紅框標出相關磚格、在右欄框出相關指標。導師只指出位置，不會替學生放磚或點火。
 
-目前只有「本機提示」模式（規則產生，不呼叫 AI、不需金鑰）。導師需要本機服務，GitHub Pages 線上版不提供：
+| 模式 | 說明 |
+|---|---|
+| 本機提示 | 規則產生，不呼叫 AI、不需金鑰 |
+| NMKING 真實模型 | 教師在 `teacher.html` 設定 NMKING 金鑰後可選；每次提問呼叫一次 AI，可能消耗額度，不自動重試 |
+
+導師需要本機服務，GitHub Pages 線上版不提供：
 
 ```bash
 npm run tutor:build   # 以 base=/ 建置到 dist-tutor/
-npm run tutor:serve   # http://127.0.0.1:8620/
+npm run tutor:serve   # 學生：http://127.0.0.1:8620/　教師：http://127.0.0.1:8620/teacher.html
 ```
 
-Windows 可直接雙擊 `start-tutor.cmd`。服務只監聽本機 `127.0.0.1`。規劃與後續階段（NMKING 真實模型、教師工作台）見 [AI 功能計畫書](docs/AI_TUTOR_PLAN.md)。
+Windows 可直接雙擊 `start-tutor.cmd`。服務只監聽本機 `127.0.0.1`；教師密碼以雜湊、金鑰以明文保存在 `local-data/`（已列入 .gitignore，不要提交或複製給學生）。真實模型會把爐型、觀察數據與學生問題送到 NMKING。規劃、接線細節與尚未驗證的項目見 [AI 功能計畫書](docs/AI_TUTOR_PLAN.md)。
 
 ## 教育用途
 
