@@ -2,7 +2,7 @@ import './teacher.css';
 import { CLASS_GOALS } from '../tutor/goals.mjs';
 import { renderWorkspace } from './workspace';
 
-type TeacherState = { initialized: boolean; aiConfigured: boolean; goal: string; loggedIn: boolean };
+type TeacherState = { initialized: boolean; aiConfigured: boolean; sheetConfigured: boolean; goal: string; loggedIn: boolean };
 
 const PASSWORD_MIN = 12;
 const app = document.querySelector<HTMLElement>('#teacher-app')!;
@@ -27,6 +27,7 @@ app.innerHTML = `
     </ul>
     <p>每次提問只呼叫一次 AI，不會自動重試；本機服務每分鐘最多受理 6 次 AI 提問（可用環境變數 <code>TUTOR_AI_PER_MINUTE</code> 調整）。費用與額度以 NMKING 公告為準。</p>
     <p>金鑰取得：<a href="https://ai.nmking.io" target="_blank" rel="noopener noreferrer">NMKING 平台</a>、<a href="https://ai.nmking.io/trial" target="_blank" rel="noopener noreferrer">試用申請</a>。</p>
+    <p>設定 Google 試算表同步後，學生代號、爐型、測試摘要與導師問答會寫入老師自己的試算表；知道 Apps Script 網址加 RECORD_TOKEN 的人可以讀寫這些紀錄，兩者都不要公開。</p>
     <p class="teacher-warning">金鑰以明文保存在專案的 <code>local-data/</code> 資料夾：能操作這台電腦檔案的人仍可能取出。不要把這個資料夾複製給學生或上傳 GitHub。</p>
   </section>
   <p class="teacher-back"><a href="/">← 回到模擬器</a></p>
@@ -93,6 +94,7 @@ function renderStatus(state: TeacherState) {
   const chips: [string, boolean][] = [
     [state.initialized ? '教師密碼：已設定' : '教師密碼：未設定', state.initialized],
     [state.aiConfigured ? 'NMKING 金鑰：已設定' : 'NMKING 金鑰：未設定', state.aiConfigured],
+    [state.sheetConfigured ? '試算表同步：已設定' : '試算表同步：未設定', state.sheetConfigured],
     [state.loggedIn ? '已登入' : '未登入', state.loggedIn],
   ];
   statusBox.replaceChildren(...chips.map(([text, ok]) => {
@@ -160,6 +162,23 @@ function renderSettings(into: HTMLElement, state: TeacherState) {
       </label>
       <div class="teacher-actions"><button type="submit" class="teacher-primary">更新目標</button></div>
     </form>
+    <form id="sheet-form" class="teacher-form">
+      <h2>Google 試算表同步（選用）</h2>
+      <p class="teacher-hint">多台電腦的紀錄可集中到老師自己的試算表。設定步驟見專案的 <code>docs/GOOGLE_SHEET_SYNC.md</code>：在試算表貼上 <code>scripts/tutor/sheets/Code.gs</code>、設定指令碼屬性 RECORD_TOKEN、部署為網頁應用程式。</p>
+      <label class="teacher-field" for="sheet-url">
+        <span>${state.sheetConfigured ? 'Apps Script 網址（留白＝不變）' : 'Apps Script 網址（結尾是 /exec）'}</span>
+        <input id="sheet-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec" />
+      </label>
+      <label class="teacher-field" for="sheet-token">
+        <span>${state.sheetConfigured ? 'RECORD_TOKEN（留白＝不變）' : 'RECORD_TOKEN（16～200 個英數符號，與 Apps Script 相同）'}</span>
+        <input id="sheet-token" type="password" autocomplete="off" spellcheck="false" />
+      </label>
+      <div class="teacher-actions">
+        <button type="button" id="sheet-generate" class="teacher-secondary">產生一組隨機 RECORD_TOKEN</button>
+      </div>
+      <label class="teacher-check"><input id="sheet-clear" type="checkbox" ${state.sheetConfigured ? '' : 'disabled'} /> 停用同步並清除這台電腦保存的網址與 RECORD_TOKEN（試算表內容不會被刪除）</label>
+      <div class="teacher-actions"><button type="submit" class="teacher-primary">保存同步設定</button></div>
+    </form>
     <form id="settings-form" class="teacher-form">
       <h2>金鑰與密碼</h2>
       ${field('settings-key', state.aiConfigured ? '更換 NMKING AI 金鑰（留白＝保留目前金鑰）' : 'NMKING AI 金鑰', 'password', 'off')}
@@ -176,6 +195,28 @@ function renderSettings(into: HTMLElement, state: TeacherState) {
     const next = await call('/api/teacher/settings', { goal });
     say(`本課目標已改為「${CLASS_GOALS[next.goal as keyof typeof CLASS_GOALS]?.label ?? ''}」；學生重新開啟導師視窗或重新整理後就會看到。`, 'ok');
     state.goal = next.goal;
+  });
+  into.querySelector<HTMLButtonElement>('#sheet-generate')!.addEventListener('click', () => {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    const token = Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join('');
+    const input = into.querySelector<HTMLInputElement>('#sheet-token')!;
+    input.type = 'text';
+    input.value = token;
+    input.select();
+    say('已產生 RECORD_TOKEN：請複製到 Apps Script「專案設定 → 指令碼屬性」，再按「保存同步設定」。', 'info');
+  });
+  bindSubmit(into.querySelector<HTMLFormElement>('#sheet-form')!, async () => {
+    const clearSheet = into.querySelector<HTMLInputElement>('#sheet-clear')!.checked;
+    const sheetUrl = value('sheet-url').trim();
+    const sheetToken = value('sheet-token').trim();
+    if (clearSheet && (sheetUrl || sheetToken)) {
+      say('「停用同步」與「更新網址／RECORD_TOKEN」只能擇一。', 'error');
+      return;
+    }
+    const next = await call('/api/teacher/settings', { sheetUrl, sheetToken, clearSheet });
+    say(clearSheet ? '已停用試算表同步。' : '同步設定已保存；到「學生紀錄」分頁按「與試算表同步」測試。', 'ok');
+    render(next);
   });
   bindSubmit(into.querySelector<HTMLFormElement>('#settings-form')!, async () => {
     const password = value('settings-password');

@@ -17,6 +17,7 @@ import {
 import { ProviderError, providerConfig, requestModelGuidance } from './nmking.mjs';
 import { RecordError, cleanStudentId, designOf, endReason, openRecordStore } from './record-store.mjs';
 import { AnalysisError, localAnalysis, modelAnalysis, selectRecords } from './teacher-analysis.mjs';
+import { SyncError, openSheetSync } from './sheet-sync.mjs';
 import { SettingsError, openTeacherConfig } from './teacher-config.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -24,6 +25,7 @@ export const DEFAULT_PORT = 8620;
 export const DEFAULT_STATIC_DIR = path.join(ROOT, 'dist-tutor');
 export const DEFAULT_SETTINGS_FILE = path.join(ROOT, 'local-data', 'teacher-settings.json');
 export const DEFAULT_RECORDS_FILE = path.join(ROOT, 'local-data', 'records', 'events.jsonl');
+export const DEFAULT_SYNC_STATE_FILE = path.join(ROOT, 'local-data', 'sync-state.json');
 const HOST = '127.0.0.1';
 const MAX_BODY_BYTES = 64 * 1024;
 const SESSION_COOKIE = 'stove_teacher';
@@ -87,6 +89,18 @@ const ERRORS = {
   RECORDS_BUSY: [429, '紀錄寫入太頻繁，請稍後再試。'],
   INVALID_SELECTION: [400, '請選擇 1～100 筆有效紀錄再分析。'],
   ANALYSIS_BUSY: [429, '上一個 AI 分析還在進行，請等它完成。'],
+  INVALID_SHEET_URL: [400, '試算表網址需是 Apps Script 部署的 https://script.google.com/macros/s/…/exec。'],
+  INVALID_SHEET_TOKEN: [400, 'RECORD_TOKEN 需為 16～200 個英數符號，不能有空白。'],
+  SHEET_PAIR_REQUIRED: [400, '試算表網址與 RECORD_TOKEN 要一起設定。'],
+  SHEET_NOT_CONFIGURED: [409, '尚未設定試算表網址與 RECORD_TOKEN。'],
+  SHEET_AUTH_REJECTED: [502, '試算表拒絕了 RECORD_TOKEN：請確認 Apps Script 的指令碼屬性與教師頁設定相同。'],
+  SHEET_REJECTED: [502, '試算表指令碼回報錯誤：請確認已執行 setupSheet 並重新部署。'],
+  SHEET_BAD_RESPONSE: [502, '試算表網址沒有回傳預期資料：請確認部署為「網頁應用程式」，存取權是「所有人」。'],
+  SHEET_BAD_REDIRECT: [502, '試算表回應轉到非 Google 的網址，已停止同步。'],
+  SHEET_HTTP_ERROR: [502, '試算表服務回應錯誤，請稍後再試。'],
+  SHEET_TIMEOUT: [504, '試算表回應太慢，請稍後再試。'],
+  SHEET_NETWORK: [502, '連不到 Google 試算表，請確認這台電腦可以上網。'],
+  SHEET_FAILED: [502, '同步失敗，請稍後再試。'],
 };
 
 class RequestError extends Error {
@@ -212,6 +226,8 @@ export async function createTutorServer({
   staticDir = DEFAULT_STATIC_DIR,
   settingsFile = DEFAULT_SETTINGS_FILE,
   recordsFile = DEFAULT_RECORDS_FILE,
+  syncStateFile = DEFAULT_SYNC_STATE_FILE,
+  sheetFetchImpl,
   env = process.env,
   fetchImpl = fetch,
   now = Date.now,
@@ -219,6 +235,9 @@ export async function createTutorServer({
   const root = path.resolve(staticDir);
   const settings = await openTeacherConfig(settingsFile);
   const store = await openRecordStore(recordsFile, { now });
+  const sheetSync = await openSheetSync({
+    store, stateFile: syncStateFile, getConfig: settings.sheet, fetchImpl: sheetFetchImpl ?? fetchImpl, now,
+  });
   const aiConfig = providerConfig(env);
   const perMinute = Number.parseInt(env.TUTOR_AI_PER_MINUTE ?? '', 10) || DEFAULT_MODEL_PER_MINUTE;
   const sessions = new Map();
@@ -262,7 +281,7 @@ export async function createTutorServer({
   }
 
   function teacherState(req, loggedIn = Boolean(currentSession(req))) {
-    return { ...settings.status(), goal: settings.goal(), loggedIn };
+    return { ...settings.status(), sheetConfigured: Boolean(settings.sheet().url), goal: settings.goal(), loggedIn };
   }
 
   async function modelReply(req, res, context, question, history) {
@@ -307,7 +326,7 @@ export async function createTutorServer({
       throw new RequestError(error.code ?? error.message);
     }
     const base = { type: 'tutor', studentId, goal: settings.goal(), mode: body.mode, question, design: designOf(context) };
-    const save = (fields) => store.append({ ...base, ...fields }).catch((error) => {
+    const save = (fields) => store.append({ ...base, ...fields }).then(() => sheetSync.schedulePush()).catch((error) => {
       console.error('Could not save tutor record', error);
     });
 
@@ -347,6 +366,7 @@ export async function createTutorServer({
       type: 'test', studentId, goal: settings.goal(), endReason: endReason(body.endReason),
       backend: context.run.backend, design: designOf(context), summary,
     });
+    sheetSync.schedulePush();
     json(res, 200, { saved: true, id: record.id });
   }
 
@@ -397,7 +417,21 @@ export async function createTutorServer({
         total: all.length,
         truncated: all.length > TEACHER_RECORD_LIMIT,
         goals: Object.values(CLASS_GOALS).map(({ id, label }) => ({ id, label })),
+        sync: sheetSync.status(),
       });
+    }
+    if (pathname === '/api/teacher/sync') {
+      if (req.method !== 'POST') return json(res, 405, { error: '不支援的方法。' });
+      if (!sameOrigin(req)) return json(res, 403, { error: '只接受本頁送出的請求。' });
+      if (!currentSession(req)) throw new RequestError('UNAUTHORIZED');
+      try {
+        const result = await sheetSync.sync();
+        return json(res, 200, { result, sync: sheetSync.status() });
+      } catch (error) {
+        if (!(error instanceof SyncError)) throw error;
+        const [status, message] = ERRORS[error.code] ?? ERRORS.SHEET_FAILED;
+        return json(res, status, { error: message, code: error.code, sync: sheetSync.status() });
+      }
     }
     if (pathname === '/api/teacher/analyze') {
       if (req.method !== 'POST') return json(res, 405, { error: '不支援的方法。' });
@@ -445,6 +479,7 @@ export async function createTutorServer({
       if (!token) throw new RequestError('UNAUTHORIZED');
       await settings.update({
         password: body.password || undefined, aiKey: body.aiKey, clearAi: body.clearAi === true, goal: body.goal,
+        sheetUrl: body.sheetUrl, sheetToken: body.sheetToken, clearSheet: body.clearSheet === true,
       });
       // A new password signs out every other open teacher page.
       if (body.password) for (const other of sessions.keys()) if (other !== token) sessions.delete(other);
@@ -482,7 +517,7 @@ export async function createTutorServer({
       return await serveStatic(req, res, root);
     } catch (error) {
       const code = error instanceof RequestError || error instanceof ProviderError || error instanceof SettingsError ||
-        error instanceof RecordError || error instanceof AnalysisError ? error.code : null;
+        error instanceof RecordError || error instanceof AnalysisError || error instanceof SyncError ? error.code : null;
       if (code && ERRORS[code] && !res.headersSent) return fail(res, code);
       console.error('Tutor request failed', error);
       if (!res.headersSent) json(res, 500, { error: '本機服務發生錯誤。' });
@@ -490,6 +525,7 @@ export async function createTutorServer({
       return undefined;
     }
   });
+  server.on('close', () => sheetSync.stop());
   return server;
 }
 

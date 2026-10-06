@@ -64,21 +64,15 @@ export async function openRecordStore(file, { now = Date.now } = {}) {
   let seq = records.reduce((max, record) => Math.max(max, record.seq), 0);
   let writing = Promise.resolve();
 
-  /** Adds a record (fields already validated by the caller) and returns it. */
-  function append(fields) {
-    const time = now();
-    const record = {
-      id: newId(time),
-      seq: ++seq,
-      timestamp: new Date(time).toISOString(),
-      ...fields,
-      goal: normalizeGoal(fields.goal),
-    };
+  const ids = new Set(records.map((record) => record.id));
+
+  function write(record) {
     const run = async () => {
       await fs.mkdir(path.dirname(file), { recursive: true });
       await fs.appendFile(file, `${JSON.stringify(record)}\n`, { mode: 0o600 });
       records.push(record);
-      if (records.length > MAX_RECORDS_IN_MEMORY) records.shift();
+      ids.add(record.id);
+      if (records.length > MAX_RECORDS_IN_MEMORY) ids.delete(records.shift().id);
       return record;
     };
     const result = writing.then(run, run);
@@ -86,8 +80,26 @@ export async function openRecordStore(file, { now = Date.now } = {}) {
     return result;
   }
 
+  /** Adds a new local record (fields already validated by the caller) and returns it. */
+  function append(fields) {
+    const time = now();
+    return write({ ...fields, id: newId(time), seq: ++seq, timestamp: new Date(time).toISOString(), goal: normalizeGoal(fields.goal) });
+  }
+
+  /**
+   * Adds a record pulled from the class spreadsheet. It keeps its id and time,
+   * gets a local sequence number and is marked so it is never pushed back.
+   */
+  function importRecord(record) {
+    if (ids.has(record.id)) return Promise.resolve(null);
+    ids.add(record.id);
+    return write({ ...record, seq: ++seq, source: 'sheet', goal: normalizeGoal(record.goal) });
+  }
+
   return {
     append,
+    importRecord,
+    has: (id) => ids.has(id),
     all: () => records.slice(),
     skipped: () => skipped,
   };

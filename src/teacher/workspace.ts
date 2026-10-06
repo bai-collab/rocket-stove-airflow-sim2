@@ -15,7 +15,11 @@ type LearningRecord = {
   mode?: 'mock' | 'model'; status?: 'completed' | 'failed'; question?: string; guidance?: string; followup?: string;
   errorCode?: string; relatedMetrics?: string[];
 };
-type RecordsResponse = { records: LearningRecord[]; total: number; truncated: boolean };
+type SyncStatus = {
+  configured: boolean; computer: string; pending: number; lastSyncAt: string; lastError: string;
+  lastPushed: number; lastImported: number; running: boolean;
+};
+type RecordsResponse = { records: LearningRecord[]; total: number; truncated: boolean; sync: SyncStatus };
 type AnalysisItem = { text: string; recordIds: string[] };
 type AnalysisResult = { observations: AnalysisItem[]; interpretations: AnalysisItem[]; suggestions: AnalysisItem[]; limitations: string[] };
 
@@ -150,9 +154,13 @@ export function renderWorkspace(container: HTMLElement, options: { aiConfigured:
   const refresh = el('button', { className: 'teacher-secondary', text: '重新整理', attrs: { type: 'button' } });
   const scopeNote = el('p', { className: 'scope-note' });
   const timeline = el('ol', { className: 'record-timeline' });
+  const syncText = el('span', { className: 'sync-text' });
+  const syncButton = el('button', { className: 'teacher-secondary', text: '與試算表同步', attrs: { type: 'button' } });
+  const syncBar = el('div', { className: 'sync-bar', attrs: { role: 'status' } }, [syncText, syncButton]);
   recordsPanel.append(el('div', { className: 'records-layout' }, [
     el('aside', { className: 'student-aside' }, [search, studentList]),
     el('div', { className: 'records-main' }, [
+      syncBar,
       el('div', { className: 'record-filters' }, [typeFilter, goalFilter, dateFilter, refresh]),
       scopeNote,
       timeline,
@@ -216,6 +224,34 @@ export function renderWorkspace(container: HTMLElement, options: { aiConfigured:
     renderAnalysisScope();
   }
 
+  function renderSync(sync: SyncStatus, error = '') {
+    syncButton.hidden = !sync.configured;
+    syncBar.dataset.state = error || sync.lastError ? 'error' : sync.configured ? 'ok' : 'off';
+    if (!sync.configured) {
+      syncText.textContent = 'Google 試算表同步：未設定（可到「設定」分頁填入 Apps Script 網址與 RECORD_TOKEN）。';
+      return;
+    }
+    const last = sync.lastSyncAt ? `上次同步 ${timeLabel.format(new Date(sync.lastSyncAt))}（送出 ${sync.lastPushed}、匯入 ${sync.lastImported}）` : '尚未同步';
+    syncText.textContent = `Google 試算表：${last}；待送出 ${sync.pending} 筆；這台電腦代號 ${sync.computer}。` +
+      (error ? ` 同步失敗：${error}` : sync.lastError ? ` 上次同步失敗（${sync.lastError}），新紀錄仍保存在本機。` : '');
+  }
+
+  syncButton.addEventListener('click', async () => {
+    syncButton.disabled = true;
+    syncButton.textContent = '同步中…';
+    try {
+      const response = await fetch('/api/teacher/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const data = await response.json().catch(() => null);
+      if (data?.sync) renderSync(data.sync as SyncStatus, response.ok ? '' : String(data.error ?? ''));
+      if (response.ok) await loadRecords();
+    } catch {
+      syncText.textContent = '連不到本機導師服務。';
+    } finally {
+      syncButton.disabled = false;
+      syncButton.textContent = '與試算表同步';
+    }
+  });
+
   async function loadRecords() {
     refresh.disabled = true;
     try {
@@ -223,6 +259,7 @@ export function renderWorkspace(container: HTMLElement, options: { aiConfigured:
       const data = await response.json().catch(() => null) as RecordsResponse | null;
       if (!response.ok || !data) throw new Error((data as { error?: string } | null)?.error ?? '讀取紀錄失敗。');
       records = data.records;
+      renderSync(data.sync);
       truncatedNote = data.truncated ? `；伺服器只送出最新 ${records.length} 筆（共 ${data.total} 筆）` : '';
       renderStudents();
       renderTimeline();

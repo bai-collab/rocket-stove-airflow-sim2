@@ -174,7 +174,7 @@ test('teacher setup, login, settings and the student model path end to end', asy
     });
     const session = async (cookie = '') => (await fetch(`${base}/api/teacher/session`, { headers: cookie ? { Cookie: cookie } : {} })).json();
 
-    assert.deepEqual(await session(), { initialized: false, aiConfigured: false, goal: 'free', loggedIn: false });
+    assert.deepEqual(await session(), { initialized: false, aiConfigured: false, sheetConfigured: false, goal: 'free', loggedIn: false });
     assert.equal((await post('/api/teacher/login', { password: PASSWORD })).status, 409);
     assert.equal((await post('/api/teacher/setup', { password: 'short' })).status, 400);
 
@@ -185,7 +185,7 @@ test('teacher setup, login, settings and the student model path end to end', asy
     assert.match(setCookie, /SameSite=Strict/);
     assert.match(setCookie, /Path=\/api\/teacher/);
     const cookie = setCookie.split(';')[0];
-    assert.deepEqual(await session(cookie), { initialized: true, aiConfigured: false, goal: 'free', loggedIn: true });
+    assert.deepEqual(await session(cookie), { initialized: true, aiConfigured: false, sheetConfigured: false, goal: 'free', loggedIn: true });
     assert.equal((await post('/api/teacher/setup', { password: PASSWORD })).status, 409);
 
     // Settings require a session and a same-origin request.
@@ -196,7 +196,7 @@ test('teacher setup, login, settings and the student model path end to end', asy
     });
     assert.equal(crossSite.status, 403);
     const saved = await post('/api/teacher/settings', { aiKey: API_KEY }, cookie);
-    assert.deepEqual(await saved.json(), { initialized: true, aiConfigured: true, goal: 'free', loggedIn: true });
+    assert.deepEqual(await saved.json(), { initialized: true, aiConfigured: true, sheetConfigured: false, goal: 'free', loggedIn: true });
 
     const status = await (await fetch(`${base}/api/tutor/status`)).json();
     assert.deepEqual(status.modes, { mock: true, model: true });

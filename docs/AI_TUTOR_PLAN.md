@@ -1,6 +1,6 @@
 # 火箭爐模擬器 AI 功能計畫書
 
-> 狀態：P1（本機服務＋本機提示導師）、P2（NMKING 真實模型＋教師設定頁）與 P3（學生代號、學習紀錄、本課目標、教師工作台）已實作；P4（GAS 同步、校內區網）未開始
+> 狀態：P1（本機服務＋本機提示導師）、P2（NMKING 真實模型＋教師設定頁）、P3（學生代號、學習紀錄、本課目標、教師工作台）與 P4 的 Google 試算表同步已實作；P4 校內區網未開始
 > 參考：`bai-collab/osep-judge`（`scripts/tutor/`、`src/components/judge-panel/`）、`bai-collab/teacher_UI`（`skill/teacher-workspace-ui/`）
 
 ## 0. 結論先講
@@ -120,7 +120,7 @@ GitHub Pages 靜態版維持現狀（無 AI），AI 功能只在本機服務版�
 | **P1 本機服務＋導師（模擬模式）** ✅ | `scripts/tutor/server.mjs`、`stove-context.mjs`（快照＋清洗＋ASCII 圖）、浮動導師 UI、格子／指標高亮、擴充 `interpret()` 為 mock 導師 | `node --test` 覆蓋清洗、高亮座標驗證、mock 回覆；Playwright 截圖：桌面／平板導師可開關、高亮正確、不擋住點火按鈕 |
 | **P2 真實模型** ✅ | `provider.mjs`（Responses 相容、endpoint/model 由環境變數、非串流、不自動重試、逾時取消）、教師設定頁（密碼 12 字＋API KEY） | 假 AI 伺服器測 401/429/逾時/JSON 錯誤/越權引用；金鑰不出現在任何回應或前端儲存 |
 | **P3 紀錄＋教師工作台** ✅ | 學生代號、`test`／`ai` 紀錄、教師頁（以 teacher_UI 範本改造：設計縮圖取代積木快照）、教師 AI 分析 | 假資料 DEMO 模式可搜尋、篩選、展開、分析、引用跳回；登出清空 |
-| **P4（選用）GAS 同步、校內區網** | 沿用 teacher_UI `Code.gs` 與 `school-lan.mjs`；區網只開學生路由＋求助上限 | 第二台電腦可連學生頁、教師頁回 403；GAS 實際寫入需使用者在自己帳號驗證 |
+| **P4（選用）GAS 同步 ✅、校內區網** | 沿用 teacher_UI `Code.gs` 與 `school-lan.mjs`；區網只開學生路由＋求助上限 | 第二台電腦可連學生頁、教師頁回 403；GAS 實際寫入需使用者在自己帳號驗證 |
 | **P5 文件** | README、`docs/TEACHER-SETUP.md`、`IMPLEMENTATION_STATUS.yaml` 更新 | 依文件從零啟動成功 |
 
 每階段獨立 PR；`npm test`、`npm run typecheck`、`npm run build` 必須維持綠燈。AI 功能**不修改任何物理或 WGSL**，符合 `agents.md` 第 8 條「不要在同一步混改物理與 GPU」的精神。
@@ -188,3 +188,16 @@ GitHub Pages 靜態版維持現狀（無 AI），AI 功能只在本機服務版�
 界線：
 - 測試摘要由學生瀏覽器的模擬結果計算，伺服器只檢查格式與範圍，不能證明數值未被竄改；學生代號為自填。
 - 分析與導師都不打分數、不排名；「多留炭」與「低黑煙」本來就互相拉扯，不同目標的結果不互相比較。
+
+## 12. P4 Google 試算表同步摘要
+
+| 檔案 | 內容 |
+|---|---|
+| `scripts/tutor/sheets/Code.gs` | 綁定教師試算表的 Apps Script：`append`（每批 ≤50，依紀錄 ID 去重）、`read`（每頁 ≤100）；RECORD_TOKEN 驗證、文字加零寬前綴防公式、完整 JSON 分存 4 個隱藏欄 |
+| `scripts/tutor/sheet-sync.mjs` | 同步引擎：推送本機紀錄、拉回其他電腦紀錄（標記 `source: sheet`，不回推）；`local-data/sync-state.json` 記錄進度與電腦代號；換試算表網址會重新推送與讀取；轉址只接受 `script.googleusercontent.com` 且以 GET、不帶 token；拉回的紀錄嚴格驗證 |
+| `scripts/tutor/teacher-config.mjs` | 保存 Apps Script 網址與 RECORD_TOKEN（16～200 碼，需成對設定，留白保留，可明確清除） |
+| `scripts/tutor/server.mjs` | `POST /api/teacher/sync`（登入＋同來源）；新紀錄約 15 秒後自動推送；`/api/teacher/records` 附同步狀態；token 不回傳 |
+| 教師頁 | 設定分頁的同步表單與「產生隨機 RECORD_TOKEN」；紀錄分頁的同步狀態列與「與試算表同步」 |
+| `tests/sheet-sync.test.mjs`、`tests/helpers/fake-apps-script.mjs` | 在 Node vm 執行同一份 Code.gs（模擬試算表、指令碼屬性、鎖與 302 轉址），測兩台電腦互相同步、重啟後不重複、損壞列、錯誤碼、設定規則、伺服器端點 |
+
+設定步驟見 [GOOGLE_SHEET_SYNC.md](GOOGLE_SHEET_SYNC.md)。**未驗證**：真的 Google 帳號部署（授權畫面、執行配額、實際轉址行為）。

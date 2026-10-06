@@ -5,6 +5,7 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { CLASS_GOALS, DEFAULT_GOAL } from '../../src/tutor/goals.mjs';
+import { SHEET_URL_PATTERN, isValidSheetToken } from './sheet-sync.mjs';
 
 export const PASSWORD_MIN = 12;
 export const PASSWORD_MAX = 256;
@@ -26,6 +27,11 @@ function hashPassword(password, salt) {
   return scryptSync(password, salt, SCRYPT_BYTES).toString('hex');
 }
 
+/** The spreadsheet URL and RECORD_TOKEN are set (or cleared) together. */
+function validSheetPair(url, token) {
+  return (url === '' && token === '') || (SHEET_URL_PATTERN.test(url) && isValidSheetToken(token));
+}
+
 function parseStored(raw) {
   const value = JSON.parse(raw);
   if (value?.version !== 1 || !/^[0-9a-f]{32}$/.test(value.salt ?? '') ||
@@ -36,7 +42,10 @@ function parseStored(raw) {
   // Files written before class goals existed have no goal field.
   const goal = value.goal === undefined ? DEFAULT_GOAL : value.goal;
   if (!Object.hasOwn(CLASS_GOALS, goal)) throw new SettingsError('SETTINGS_CORRUPT');
-  return { version: 1, salt: value.salt, passwordHash: value.passwordHash, aiKey: value.aiKey, goal };
+  const sheetUrl = value.sheetUrl ?? '';
+  const sheetToken = value.sheetToken ?? '';
+  if (!validSheetPair(sheetUrl, sheetToken)) throw new SettingsError('SETTINGS_CORRUPT');
+  return { version: 1, salt: value.salt, passwordHash: value.passwordHash, aiKey: value.aiKey, goal, sheetUrl, sheetToken };
 }
 
 export async function openTeacherConfig(file) {
@@ -71,10 +80,12 @@ export async function openTeacherConfig(file) {
    * First save needs a password. Later saves: blank fields keep the stored
    * value, `clearAi` removes the key explicitly.
    */
-  function update({ password, aiKey, clearAi, goal } = {}) {
+  function update({ password, aiKey, clearAi, goal, sheetUrl, sheetToken, clearSheet } = {}) {
     const run = async () => {
       if ((password !== undefined && typeof password !== 'string') ||
-          (aiKey !== undefined && typeof aiKey !== 'string')) {
+          (aiKey !== undefined && typeof aiKey !== 'string') ||
+          (sheetUrl !== undefined && typeof sheetUrl !== 'string') ||
+          (sheetToken !== undefined && typeof sheetToken !== 'string')) {
         throw new SettingsError('INVALID_SETTINGS');
       }
       const newPassword = password ?? '';
@@ -90,7 +101,19 @@ export async function openTeacherConfig(file) {
       const next = {
         version: 1, salt: stored?.salt, passwordHash: stored?.passwordHash,
         aiKey: stored?.aiKey ?? '', goal: goal ?? stored?.goal ?? DEFAULT_GOAL,
+        sheetUrl: stored?.sheetUrl ?? '', sheetToken: stored?.sheetToken ?? '',
       };
+      if (clearSheet === true) {
+        next.sheetUrl = '';
+        next.sheetToken = '';
+      } else {
+        // Blank keeps the stored value, so the token can stay while the URL changes.
+        next.sheetUrl = (sheetUrl ?? '').trim() || next.sheetUrl;
+        next.sheetToken = (sheetToken ?? '').trim() || next.sheetToken;
+        if (next.sheetUrl && !SHEET_URL_PATTERN.test(next.sheetUrl)) throw new SettingsError('INVALID_SHEET_URL');
+        if (next.sheetToken && !isValidSheetToken(next.sheetToken)) throw new SettingsError('INVALID_SHEET_TOKEN');
+        if (!validSheetPair(next.sheetUrl, next.sheetToken)) throw new SettingsError('SHEET_PAIR_REQUIRED');
+      }
       if (newPassword) {
         next.salt = randomBytes(16).toString('hex');
         next.passwordHash = hashPassword(newPassword, next.salt);
@@ -116,5 +139,10 @@ export async function openTeacherConfig(file) {
     return timingSafeEqual(Buffer.from(hashPassword(password, stored.salt), 'hex'), expected);
   }
 
-  return { status, verify, update, apiKey: () => stored?.aiKey ?? '', goal: () => stored?.goal ?? DEFAULT_GOAL };
+  return {
+    status, verify, update,
+    apiKey: () => stored?.aiKey ?? '',
+    goal: () => stored?.goal ?? DEFAULT_GOAL,
+    sheet: () => ({ url: stored?.sheetUrl ?? '', token: stored?.sheetToken ?? '' }),
+  };
 }
