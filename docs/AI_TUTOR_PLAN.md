@@ -1,6 +1,6 @@
 # 火箭爐模擬器 AI 功能計畫書
 
-> 狀態：草案，待使用者確認（尚未實作）
+> 狀態：P1 已實作（本機服務＋本機提示導師）；P2 起尚未開始
 > 參考：`bai-collab/osep-judge`（`scripts/tutor/`、`src/components/judge-panel/`）、`bai-collab/teacher_UI`（`skill/teacher-workspace-ui/`）
 
 ## 0. 結論先講
@@ -116,8 +116,8 @@ GitHub Pages 靜態版維持現狀（無 AI），AI 功能只在本機服務版�
 
 | 階段 | 內容 | 驗收（可驗證） |
 |---|---|---|
-| **P0 決策** | 確認 §8 的待決事項，尤其授權與 AI 服務商 | 使用者回覆 |
-| **P1 本機服務＋導師（模擬模式）** | `scripts/tutor/server.mjs`、`stove-context.mjs`（快照＋清洗＋ASCII 圖）、浮動導師 UI、格子／指標高亮、擴充 `interpret()` 為 mock 導師 | `node --test` 覆蓋清洗、高亮座標驗證、mock 回覆；Playwright 截圖：桌面／平板導師可開關、高亮正確、不擋住點火按鈕 |
+| **P0 決策** ✅ | 確認 §8 的待決事項，尤其授權與 AI 服務商 | 已決定，見 §8 |
+| **P1 本機服務＋導師（模擬模式）** ✅ | `scripts/tutor/server.mjs`、`stove-context.mjs`（快照＋清洗＋ASCII 圖）、浮動導師 UI、格子／指標高亮、擴充 `interpret()` 為 mock 導師 | `node --test` 覆蓋清洗、高亮座標驗證、mock 回覆；Playwright 截圖：桌面／平板導師可開關、高亮正確、不擋住點火按鈕 |
 | **P2 真實模型** | `provider.mjs`（Responses 相容、endpoint/model 由環境變數、非串流、不自動重試、逾時取消）、教師設定頁（密碼 12 字＋API KEY） | 假 AI 伺服器測 401/429/逾時/JSON 錯誤/越權引用；金鑰不出現在任何回應或前端儲存 |
 | **P3 紀錄＋教師工作台** | 學生代號、`test`／`ai` 紀錄、教師頁（以 teacher_UI 範本改造：設計縮圖取代積木快照）、教師 AI 分析 | 假資料 DEMO 模式可搜尋、篩選、展開、分析、引用跳回；登出清空 |
 | **P4（選用）GAS 同步、校內區網** | 沿用 teacher_UI `Code.gs` 與 `school-lan.mjs`；區網只開學生路由＋求助上限 | 第二台電腦可連學生頁、教師頁回 403；GAS 實際寫入需使用者在自己帳號驗證 |
@@ -127,17 +127,33 @@ GitHub Pages 靜態版維持現狀（無 AI），AI 功能只在本機服務版�
 
 ## 7. 風險與反方意見
 
-1. **授權（最重要）**：osep-judge／teacher_UI 是 GPL-3.0。若直接複製其程式碼，本專案需採 GPL-3.0 並保留來源說明。替代方案：只參照「資料契約與設計」重新撰寫。需使用者決定（§8-1）。
+1. **授權（最重要）**：osep-judge／teacher_UI 是 GPL-3.0。若直接複製其程式碼，本專案需採 GPL-3.0 並保留來源說明。替代方案：只參照「資料契約與設計」重新撰寫。**已決定：只參照設計重寫，不複製程式碼。**
 2. **⚠️ WebGPU 與區網衝突（反直覺）**：`navigator.gpu` 只在 secure context 可用。學生從 `http://教師機IP:8620` 連線**不是** secure context，模擬會自動退回 CPU 後端；`127.0.0.1` 則不受影響。區網模式若要 GPU，需 HTTPS（自簽憑證在教室部署很麻煩）。osep-judge 沒有這個問題，因為它不用 WebGPU。
 3. **快照不等於理解**：模型看到的是格子與數字，不是流場本身；可能過度自信地講「因為煙道太短」。對策：提示中強制「依數據」、回覆必須掛 `relatedMetrics`，教師分析分開「觀察／推測」。
 4. **費用與濫用**：真實模型每次求助計費。沿用 osep：不自動重試、每台／全班求助上限、預設模擬模式。
 5. **反方意見：其實不需要 LLM？** 目前 `interpret()` 已能給 8 種情境回饋。若主要目的是學生回饋，加強規則式提示（P1）可能就夠，真實模型（P2）只在需要回答開放式「為什麼」時才有價值。建議先做 P1，課堂試用後再決定 P2 投入程度。
-6. **AI 服務相容性**：osep 使用 NMKING 的 Responses 端點；teacher_UI 範本把 endpoint/model 留空由環境設定。本計畫採後者，若要改用其他服務（例如 Claude Messages API）需另寫轉接，不在 P2 範圍內。
+6. **AI 服務相容性**：osep 使用 NMKING 的 Responses 端點；teacher_UI 範本把 endpoint/model 留空由環境設定。**已決定採用 NMKING**（P2 實作）；endpoint/model 仍保留環境變數覆寫。若要改用其他服務（例如 Claude Messages API）需另寫轉接，不在 P2 範圍內。
 
-## 8. 待決事項（請回覆）
+## 8. 決策紀錄
 
-1. **授權**：同意本專案採 GPL-3.0 並複製參考程式碼？還是只參照設計重寫？
-2. **AI 服務**：沿用 osep 的 NMKING 端點與模型？或指定其他服務？
-3. **範圍**：只要學生導師（P1–P2），還是也要教師紀錄與工作台（P3）？
-4. **區網**：是否需要學生電腦連教師機？（影響 GPU 可用性，見 §7-2）
-5. **課堂目標**：教師要設定的「設計目標」選項有哪些（低黑煙／保炭／穩定燃燒／其他）？
+| # | 事項 | 決定 |
+|---|---|---|
+| 1 | 授權 | 只參照 osep-judge／teacher_UI 的設計與資料契約重寫，不複製其 GPL-3.0 程式碼 |
+| 2 | AI 服務 | P2 使用 NMKING（Responses 相容端點） |
+| 3 | 範圍 | 先做 P1；P2／P3 待 P1 課堂試用後再排 |
+| 4 | 區網 | 未決定（影響 GPU 可用性，見 §7-2） |
+| 5 | 課堂目標 | 未決定（P3 才需要） |
+
+## 9. P1 實作摘要
+
+| 檔案 | 內容 |
+|---|---|
+| `src/tutor/stove-context.mjs` | 快照建立、後端白名單清洗、ASCII 爐型圖、回覆接地（格子／指標必須存在、內部欄位名換成畫面文字） |
+| `src/tutor/mock-tutor.mjs` | 本機規則導師：依提問關鍵字與目前狀態給一個小步驟＋一個追問，並指出相關格子與指標 |
+| `src/tutor/rule-hints.mjs` | 原 `interpret()` 抽出共用，畫面行為不變 |
+| `src/tutor/TutorPanel.ts` | 浮動導師窗：拖曳、縮放、縮小、Escape 關閉、高亮開關；文字一律 `textContent` |
+| `scripts/tutor/server.mjs` | Node 內建模組；只綁 `127.0.0.1:8620`；Host／Origin／Sec-Fetch-Site 檢查；64 KB 上限；`dist-tutor/` 靜態檔 |
+| `start-tutor.cmd` | Windows 雙擊：首次安裝相依、建置、啟動 |
+| `tests/tutor-*.test.mjs` | 清洗、接地、模擬導師、伺服器安全與靜態檔測試 |
+
+使用方式：`npm run tutor:build` → `npm run tutor:serve` → 開 `http://127.0.0.1:8620/`。GitHub Pages 版的導師按鈕會顯示「需要本機服務版」，不送出請求。

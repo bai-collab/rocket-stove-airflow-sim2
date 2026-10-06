@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit",
     "dev": "vite",
     "build": "vite build",
+    "tutor:build": "vite build --base / --outDir dist-tutor",
+    "tutor:serve": "node scripts/tutor/server.mjs",
     "check:wgsl": "vgpu check src/gpu/shaders/airflow/advect-velocity.wgsl && vgpu check src/gpu/shaders/airflow/boundary-flux-correct.wgsl && vgpu check src/gpu/shaders/airflow/boundary-flux-stats.wgsl && vgpu check src/gpu/shaders/airflow/buoyancy.wgsl && vgpu check src/gpu/shaders/airflow/divergence.wgsl && vgpu check src/gpu/shaders/airflow/pressure-jacobi.wgsl && vgpu check src/gpu/shaders/airflow/project.wgsl && vgpu check src/gpu/shaders/airflow/reduce-vec2.wgsl && vgpu check src/gpu/shaders/airflow/reduce-vec4.wgsl && vgpu check src/gpu/shaders/scalar/advect-scalar.wgsl && vgpu check src/gpu/shaders/scalar/open-boundary-exchange.wgsl && vgpu check src/gpu/shaders/scalar/scalar-mass-stats.wgsl && vgpu check src/gpu/shaders/scalar/normalize-scalar.wgsl && vgpu check src/gpu/shaders/fuel/scaffold-check.wgsl && vgpu check src/gpu/shaders/fuel/pyrolysis-pass.wgsl && vgpu check src/gpu/shaders/fuel/volatile-combustion.wgsl && vgpu check src/gpu/shaders/fuel/char-oxidation-pass.wgsl && vgpu check src/gpu/shaders/combustion/cooling-residence.wgsl && vgpu check src/gpu/shaders/combustion/wall-conduction.wgsl && vgpu check src/gpu/shaders/combustion/secondary-combustion.wgsl && vgpu check src/gpu/shaders/tracer/tracer-update.wgsl && vgpu check src/gpu/shaders/render/pack-render-state.wgsl && vgpu check src/gpu/shaders/render/pack-tracer-render-state.wgsl && vgpu check src/gpu/shaders/render/field-render.wgsl && vgpu check src/gpu/shaders/render/tracer-render.wgsl"
   },
   "dependencies": {

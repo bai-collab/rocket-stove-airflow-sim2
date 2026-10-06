@@ -166,6 +166,19 @@ completed:
     - browser GPU Physics v3 ownership
     - reaction numerical parity tests
 
+ai_tutor:
+  plan: docs/AI_TUTOR_PLAN.md
+  phase_1_local_mock_tutor: completed
+  reference_policy: design-only rewrite of osep-judge / teacher_UI; no GPL code copied
+  service: scripts/tutor/server.mjs on 127.0.0.1:8620 (Node built-ins, loopback only)
+  modes:
+    mock: rule-based, no model call
+    model: not enabled (phase 2, NMKING)
+  physics_changes: none
+  tests:
+    - tests/tutor-context.test.mjs
+    - tests/tutor-server.test.mjs
+
 next:
   phase_6_browser_release_validation:
     - add browser CPU/GPU visual parity tests

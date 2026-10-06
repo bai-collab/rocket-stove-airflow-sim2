@@ -64,6 +64,19 @@ npm run build
 - https://vgpu.sh/agents.md
 - https://vgpu.sh/llms.txt
 
+## 本機設計導師（AI 功能 P1）
+
+模擬器右上角的「🧭 設計導師」會讀取目前爐型與觀察數據，給「這一輪先做」與「接著想一想」，並在畫布上用玫紅框標出相關磚格、在右欄框出相關指標。導師只指出位置，不會替學生放磚或點火。
+
+目前只有「本機提示」模式（規則產生，不呼叫 AI、不需金鑰）。導師需要本機服務，GitHub Pages 線上版不提供：
+
+```bash
+npm run tutor:build   # 以 base=/ 建置到 dist-tutor/
+npm run tutor:serve   # http://127.0.0.1:8620/
+```
+
+Windows 可直接雙擊 `start-tutor.cmd`。服務只監聽本機 `127.0.0.1`。規劃與後續階段（NMKING 真實模型、教師工作台）見 [AI 功能計畫書](docs/AI_TUTOR_PLAN.md)。
+
 ## 教育用途
 
 本專案用於比較模型中的相對現象，不用於真實 PM2.5、CO、biochar yield、工程級燃燒效率或安全設計認證。
