@@ -21,6 +21,9 @@ import {
   WALL_MATERIAL_OPTIONS,
   getWallMaterial,
 } from './physics/wall-materials.mjs';
+import { interpretDiagnostics } from './tutor/rule-hints.mjs';
+import { SERIES_METRICS, buildStoveContext } from './tutor/stove-context.mjs';
+import { createTutorPanel, type TutorHighlight, type TutorServiceStatus } from './tutor/TutorPanel';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -32,8 +35,16 @@ app.innerHTML = `
         <p class="eyebrow">Physics v3 · Phase 5</p>
         <h1>火箭爐空氣流動與稻稈碳化模擬器</h1>
         <p>設計 → 點火 → 觀察氣流／黑煙／碳化 → 修改 → 再測試</p>
+        <p id="class-goal" class="class-goal" hidden></p>
       </div>
-      <div id="backend-status" class="status-pill">正在偵測運算後端…</div>
+      <div class="topbar-actions">
+        <label class="student-id-field" hidden>
+          <span>學生代號</span>
+          <input id="student-id" maxlength="20" autocomplete="off" spellcheck="false" placeholder="例如 S01" />
+        </label>
+        <button id="tutor-open" type="button" class="tutor-open">🧭 設計導師</button>
+        <div id="backend-status" class="status-pill">正在偵測運算後端…</div>
+      </div>
     </header>
 
     <section class="workspace">
@@ -112,6 +123,7 @@ app.innerHTML = `
           <div id="advanced" class="metrics advanced"></div>
         </details>
         <div id="feedback" class="feedback"></div>
+        <p id="record-note" class="record-note" role="status"></p>
       </aside>
     </section>
   </main>
@@ -145,6 +157,25 @@ const backendDetail = document.querySelector<HTMLParagraphElement>('#backend-det
 const controller = new BrowserSimulationController();
 controller.attachGpuCanvas(gpuCanvas);
 const sim = controller.cpu;
+const studentIdField = document.querySelector<HTMLLabelElement>('.student-id-field')!;
+const studentIdInput = document.querySelector<HTMLInputElement>('#student-id')!;
+const classGoal = document.querySelector<HTMLParagraphElement>('#class-goal')!;
+const recordNote = document.querySelector<HTMLParagraphElement>('#record-note')!;
+const STUDENT_ID_PATTERN = /^[\p{L}\p{N}_-]{1,20}$/u;
+const STUDENT_ID_KEY = 'rocket-stove-student-id';
+let serviceAvailable = false;
+
+const tutor = createTutorPanel({
+  openButton: document.querySelector<HTMLButtonElement>('#tutor-open')!,
+  getContext: tutorContext,
+  requireStudentId,
+  onHighlight: (highlight) => {
+    tutorHighlight = highlight;
+    drawPresentation();
+    renderMetrics();
+  },
+  onServiceStatus: renderServiceStatus,
+});
 let selectedTool = 'wall';
 let selectedPreset = 'straight';
 let selectedWallMaterialId = DEFAULT_WALL_MATERIAL_ID;
@@ -153,6 +184,74 @@ let lastFrame = performance.now();
 let accumulator = 0;
 let physicsBusy = false;
 let editQueue = Promise.resolve();
+let designEdited = false;
+let tutorHighlight: TutorHighlight | null = null;
+const SERIES_INTERVAL = 2;
+let runSeries: Record<string, number>[] = [];
+// One "test" is the time from ignition until the design is reset, cleared or
+// edited (or the page is left). It is recorded at most once, after 5 s.
+const MIN_RECORD_SECONDS = 5;
+const CHECKPOINT_SECONDS = 120;
+let runActive = false;
+let runSaved = false;
+let runStart = 0;
+let recordedTests = 0;
+
+function validStudentId() {
+  const id = studentIdInput.value.trim();
+  return STUDENT_ID_PATTERN.test(id) ? id : null;
+}
+
+function requireStudentId() {
+  const id = validStudentId();
+  studentIdField.classList.toggle('invalid', id === null);
+  if (id === null) studentIdInput.focus();
+  return id;
+}
+
+function renderServiceStatus(status: TutorServiceStatus) {
+  serviceAvailable = status.available;
+  studentIdField.hidden = !status.available;
+  classGoal.hidden = !status.goal || status.goal.id === 'free';
+  classGoal.textContent = status.goal ? `本課目標：${status.goal.label}——${status.goal.hint}` : '';
+}
+
+function startRunSegment() {
+  runStart = sim.time;
+  runSeries = [];
+  runActive = true;
+  runSaved = false;
+}
+
+/** Ends the current test segment and saves it when it is long enough. */
+function finishRun(reason: 'reset' | 'edit' | 'clear' | 'leave' | 'checkpoint') {
+  if (!runActive || runSaved) return;
+  runSaved = true;
+  if (!serviceAvailable || sim.time - runStart < MIN_RECORD_SECONDS) return;
+  const studentId = validStudentId();
+  if (!studentId) {
+    recordNote.textContent = '沒有學生代號，這次測試沒有記錄。';
+    return;
+  }
+  // The context is captured now, before the caller changes the design.
+  const body = JSON.stringify({ studentId, endReason: reason, context: tutorContext() });
+  void fetch('/api/records', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+    keepalive: reason === 'leave',
+  }).then(async (response) => {
+    const data = await response.json().catch(() => null);
+    if (response.ok) {
+      recordedTests += 1;
+      recordNote.textContent = `已記錄 ${recordedTests} 次測試（代號 ${studentId}）。`;
+    } else {
+      recordNote.textContent = typeof data?.error === 'string' ? data.error : '這次測試沒有記錄成功。';
+    }
+  }).catch(() => {
+    recordNote.textContent = '連不到本機導師服務，這次測試沒有記錄。';
+  });
+}
 
 function isBackendPreference(value: string | null): value is BackendPreference {
   return value === 'auto' || value === 'cpu' || value === 'gpu';
@@ -168,8 +267,10 @@ function renderBackendStatus(status: BackendStatus) {
 
 controller.subscribe(renderBackendStatus);
 
-function metric(label: string, value: string) {
-  return `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`;
+function metric(label: string, value: string, key?: string) {
+  const highlighted = key !== undefined && tutorHighlight?.metrics.includes(key);
+  const attrs = key ? ` data-metric="${key}"` : '';
+  return `<div class="metric${highlighted ? ' tutor-highlight' : ''}"${attrs}><span>${label}</span><strong>${value}</strong></div>`;
 }
 
 type FuelPhase = 'unlit' | 'burning' | 'extinguished';
@@ -354,48 +455,66 @@ function renderFuelStatus(d: ReturnType<typeof sim.diagnostics>) {
 }
 
 function interpret(d: ReturnType<typeof sim.diagnostics>) {
-  if (!sim.ignited) return '先按「點火」，再觀察高溫煙氣是否能建立自然上升流。';
-  if (d.fuelPhase === 'extinguished') return '目前火焰已熄滅；檢查燃料區是否仍有足夠熱量與氧氣。';
-  if (d.pyrolysisFraction < 0.08 && d.time > 3) return '稻稈熱裂解仍低：可檢查燃料是否被爐體阻隔、或高溫區是否建立。';
-  if (d.fuelOxygen < 0.16 && d.charRetention > 0.65) return '目前偏碳化／保炭：燃料附近缺氧，生成的炭較多被保留下來。';
-  if (d.smoke > 0.08 && d.secondaryRate < 0.001) return '目前偏不完全燃燒：黑煙較多，但二次燃燒條件不足。';
-  if (d.smokeOut > 0.02 && d.secondaryRate > 0) return '已有二次燃燒，但仍有黑煙排出；可調整煙道、混合區或開口位置。';
-  if (d.charRetention < 0.35 && d.smoke < 0.03) return '目前較偏充分燃燒：黑煙低、生成炭也持續氧化。';
-  return '目前介於燃燒與碳化之間；比較不同爐型的氧氣、黑煙排出與炭保留率。';
+  return interpretDiagnostics(d, sim.ignited);
+}
+
+function sampleRunSeries(d: ReturnType<typeof sim.diagnostics>) {
+  if (!runActive) return;
+  if (!runSaved && d.time - runStart >= CHECKPOINT_SECONDS) finishRun('checkpoint');
+  const last = runSeries.at(-1);
+  if (last && d.time - last.t < SERIES_INTERVAL) return;
+  const point: Record<string, number> = { t: d.time, burning: d.fuelPhase === 'burning' ? 1 : 0 };
+  for (const key of SERIES_METRICS) point[key] = Number(d[key as keyof typeof d]);
+  runSeries = [...runSeries.slice(-59), point];
+}
+
+function tutorContext() {
+  return buildStoveContext({
+    preset: selectedPreset,
+    edited: designEdited,
+    walls: sim.walls,
+    fuels: sim.fuels,
+    ignited: sim.ignited,
+    backend: controller.status.effective,
+    diagnostics: sim.diagnostics(),
+    series: runSeries,
+    runStart,
+  });
 }
 
 function renderMetrics() {
   const d = sim.diagnostics();
   renderFuelStatus(d);
+  sampleRunSeries(d);
   metrics.innerHTML = [
-    metric('平均氣流速度', `${d.averageSpeed.toFixed(1)} px/s`),
-    metric('燃料區相對氧氣', `${(d.fuelOxygen * 100).toFixed(0)}%`),
-    metric('燃料區溫度', `${d.fuelTemperature.toFixed(0)} °C`),
-    metric('相對黑煙量', d.smoke.toFixed(3)),
-    metric('黑煙排出累積', d.smokeOut.toFixed(3)),
-    metric('熱裂解比例', `${(d.pyrolysisFraction * 100).toFixed(1)}%`),
-    metric('炭保留率', `${(d.charRetention * 100).toFixed(1)}%`),
-    metric('碳化指標', d.carbonizationIndex.toFixed(1)),
-    metric('剩餘稻稈', d.rawStraw.toFixed(3)),
-    metric('剩餘炭', d.char.toFixed(3)),
-    metric('灰分顯現', d.ash.toFixed(3)),
-    metric('磚牆平均溫度', `${d.wallTemperature.toFixed(0)} °C`),
-    metric('磚牆內側溫度', `${d.wallInnerTemperature.toFixed(0)} °C`),
-    metric('磚牆外側溫度', `${d.wallOuterTemperature.toFixed(0)} °C`),
-    metric('等效輻射散熱', d.wallRadiationLoss.toExponential(2)),
-    metric('平均磚牆導熱係數', `k=${d.averageWallConductivity.toFixed(2)}`),
+    metric('平均氣流速度', `${d.averageSpeed.toFixed(1)} px/s`, 'averageSpeed'),
+    metric('燃料區相對氧氣', `${(d.fuelOxygen * 100).toFixed(0)}%`, 'fuelOxygen'),
+    metric('燃料區溫度', `${d.fuelTemperature.toFixed(0)} °C`, 'fuelTemperature'),
+    metric('相對黑煙量', d.smoke.toFixed(3), 'smoke'),
+    metric('黑煙排出累積', d.smokeOut.toFixed(3), 'smokeOut'),
+    metric('熱裂解比例', `${(d.pyrolysisFraction * 100).toFixed(1)}%`, 'pyrolysisFraction'),
+    metric('炭保留率', `${(d.charRetention * 100).toFixed(1)}%`, 'charRetention'),
+    metric('碳化指標', d.carbonizationIndex.toFixed(1), 'carbonizationIndex'),
+    metric('剩餘稻稈', d.rawStraw.toFixed(3), 'rawStraw'),
+    metric('剩餘炭', d.char.toFixed(3), 'char'),
+    metric('灰分顯現', d.ash.toFixed(3), 'ash'),
+    metric('磚牆平均溫度', `${d.wallTemperature.toFixed(0)} °C`, 'wallTemperature'),
+    metric('磚牆內側溫度', `${d.wallInnerTemperature.toFixed(0)} °C`, 'wallInnerTemperature'),
+    metric('磚牆外側溫度', `${d.wallOuterTemperature.toFixed(0)} °C`, 'wallOuterTemperature'),
+    metric('等效輻射散熱', d.wallRadiationLoss.toExponential(2), 'wallRadiationLoss'),
+    metric('平均磚牆導熱係數', `k=${d.averageWallConductivity.toFixed(2)}`, 'averageWallConductivity'),
   ].join('');
 
   advanced.innerHTML = [
     metric('運算後端', controller.status.effective.toUpperCase()),
     metric('GPU 場回讀', controller.status.effective === 'gpu' ? '約 5 Hz' : '每 tick'),
-    metric('二次燃燒速率', d.secondaryRate.toExponential(2)),
+    metric('二次燃燒速率', d.secondaryRate.toExponential(2), 'secondaryRate'),
     metric('壓力投影殘差', d.pressureResidual.toExponential(2)),
     metric('邊界進流', d.inflow.toFixed(2)),
     metric('邊界出流', d.outflow.toFixed(2)),
-    metric('未燃揮發氣體', d.volatileGas.toFixed(3)),
-    metric('尾氣排出累積', d.exhaustOut.toFixed(3)),
-    metric('平均溫度', `${d.averageTemperature.toFixed(1)} °C`),
+    metric('未燃揮發氣體', d.volatileGas.toFixed(3), 'volatileGas'),
+    metric('尾氣排出累積', d.exhaustOut.toFixed(3), 'exhaustOut'),
+    metric('平均溫度', `${d.averageTemperature.toFixed(1)} °C`, 'averageTemperature'),
     metric('有機守恆誤差', d.organicError.toExponential(2)),
     metric('礦物守恆誤差', d.mineralError.toExponential(2)),
   ].join('');
@@ -593,6 +712,23 @@ function drawPresentation() {
   } else {
     drawCpuField();
   }
+  drawTutorHighlights();
+}
+
+function drawTutorHighlights() {
+  if (!tutorHighlight?.cells.length) return;
+  const pulse = 0.65 + 0.35 * Math.sin(performance.now() / 260);
+  ctx.save();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = `rgba(225, 29, 72, ${pulse.toFixed(3)})`;
+  ctx.fillStyle = 'rgba(225, 29, 72, 0.12)';
+  for (const cell of tutorHighlight.cells) {
+    const x = cell.c * BUILD_CELL;
+    const y = cell.r * BUILD_CELL;
+    ctx.fillRect(x, y, BUILD_CELL, BUILD_CELL);
+    ctx.strokeRect(x + 2, y + 2, BUILD_CELL - 4, BUILD_CELL - 4);
+  }
+  ctx.restore();
 }
 
 function canvasPoint(event: PointerEvent) {
@@ -603,11 +739,20 @@ function canvasPoint(event: PointerEvent) {
   };
 }
 
+function markDesignChanged(edited: boolean) {
+  designEdited = edited;
+  runSeries = [];
+  tutor.designChanged();
+}
+
 function queueTool(event: PointerEvent) {
   const p = canvasPoint(event);
   editQueue = editQueue
     .then(async () => {
+      finishRun('edit');
       await controller.setToolAt(selectedTool, p.x, p.y, selectedWallMaterialId);
+      markDesignChanged(true);
+      if (sim.ignited) startRunSegment();
       drawPresentation();
       renderMetrics();
     })
@@ -647,8 +792,11 @@ presetGrid.innerHTML = Object.entries(STOVE_PRESETS)
   .join('');
 
 async function loadPreset(id: string) {
+  finishRun('reset');
   if (!await controller.loadPreset(id)) return;
+  runActive = false;
   selectedPreset = id;
+  markDesignChanged(false);
   const preset = STOVE_PRESETS[id as keyof typeof STOVE_PRESETS];
   presetDescription.textContent = preset.description;
   presetGrid.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((button) => {
@@ -668,7 +816,8 @@ presetGrid.addEventListener('click', (event) => {
 });
 
 igniteButton.addEventListener('click', () => {
-  void controller.ignite().catch((error) => console.error('Ignition failed', error));
+  void controller.ignite().then(() => { if (sim.ignited && !runActive) startRunSegment(); })
+    .catch((error) => console.error('Ignition failed', error));
 });
 pauseButton.addEventListener('click', () => {
   void controller.pause().then(() => {
@@ -679,7 +828,10 @@ resetButton.addEventListener('click', () => {
   void loadPreset(selectedPreset).catch((error) => console.error('Preset reset failed', error));
 });
 clearButton.addEventListener('click', () => {
+  finishRun('clear');
   void controller.clearScene().then(() => {
+    runActive = false;
+    markDesignChanged(true);
     accumulator = 0;
     drawPresentation();
     renderMetrics();
@@ -735,4 +887,18 @@ await loadPreset(selectedPreset);
 await controller.initialize(initialBackend);
 requestAnimationFrame(frameLoop);
 
+try {
+  studentIdInput.value = localStorage.getItem(STUDENT_ID_KEY) ?? '';
+} catch {
+  // Not remembered in this browser.
+}
+studentIdInput.addEventListener('input', () => {
+  studentIdField.classList.remove('invalid');
+  try {
+    localStorage.setItem(STUDENT_ID_KEY, studentIdInput.value.trim());
+  } catch {
+    // Not remembered in this browser.
+  }
+});
+window.addEventListener('pagehide', () => finishRun('leave'));
 window.addEventListener('beforeunload', () => controller.dispose());

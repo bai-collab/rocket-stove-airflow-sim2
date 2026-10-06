@@ -166,6 +166,30 @@ completed:
     - browser GPU Physics v3 ownership
     - reaction numerical parity tests
 
+ai_tutor:
+  plan: docs/AI_TUTOR_PLAN.md
+  phase_1_local_mock_tutor: completed
+  reference_policy: design-only rewrite of osep-judge / teacher_UI; no GPL code copied
+  service: scripts/tutor/server.mjs on 127.0.0.1:8620 (Node built-ins, loopback only)
+  phase_2_nmking_model_and_teacher_settings: completed_with_fake_provider_tests
+  modes:
+    mock: rule-based, no model call
+    model: NMKING Responses API via scripts/tutor/nmking.mjs; key stored only in local-data/
+  phase_3_records_goals_teacher_workspace: completed_with_fake_provider_tests
+  class_goals: [free, lowSmoke, keepChar, stableBurn]
+  records: local-data/records/events.jsonl (test and tutor records, server-assigned ids)
+  phase_4_google_sheet_sync: completed_with_simulated_apps_script_tests
+  sheet_sync: scripts/tutor/sheet-sync.mjs + scripts/tutor/sheets/Code.gs (docs/GOOGLE_SHEET_SYNC.md)
+  teacher_page: teacher.html workspace (records, AI analysis, settings; local service only)
+  unverified: real NMKING key, latency and billing; real Google Apps Script deployment
+  physics_changes: none
+  tests:
+    - tests/tutor-context.test.mjs
+    - tests/tutor-server.test.mjs
+    - tests/tutor-model.test.mjs
+    - tests/tutor-records.test.mjs
+    - tests/sheet-sync.test.mjs
+
 next:
   phase_6_browser_release_validation:
     - add browser CPU/GPU visual parity tests
